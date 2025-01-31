@@ -49,9 +49,11 @@ func main() {
 	log.Infof("Server started with conf %+v", conf)
 
 	var storage storage.Storage
+	// 是否开启 Raft
 	if conf.Raft {
 		storage = raft_storage.NewRaftStorage(conf)
 	} else {
+		// 根据 Conf 创建独立存储引擎
 		storage = standalone_storage.NewStandAloneStorage(conf)
 	}
 	if err := storage.Start(); err != nil {

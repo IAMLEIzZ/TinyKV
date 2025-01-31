@@ -29,6 +29,7 @@ func NewEngines(kvEngine, raftEngine *badger.DB, kvPath, raftPath string) *Engin
 	}
 }
 
+// 写如一对 KV
 func (en *Engines) WriteKV(wb *WriteBatch) error {
 	return wb.WriteToDB(en.Kv)
 }
@@ -37,6 +38,7 @@ func (en *Engines) WriteRaft(wb *WriteBatch) error {
 	return wb.WriteToDB(en.Raft)
 }
 
+// 关闭数据库连接
 func (en *Engines) Close() error {
 	dbs := []*badger.DB{en.Kv, en.Raft}
 	for _, db := range dbs {
@@ -50,6 +52,7 @@ func (en *Engines) Close() error {
 	return nil
 }
 
+// 删除 DB 数据库
 func (en *Engines) Destroy() error {
 	if err := en.Close(); err != nil {
 		return err
@@ -63,6 +66,7 @@ func (en *Engines) Destroy() error {
 	return nil
 }
 
+// 创建一个新的 Badger DB
 // CreateDB creates a new Badger DB on disk at path.
 func CreateDB(path string, raft bool) *badger.DB {
 	opts := badger.DefaultOptions

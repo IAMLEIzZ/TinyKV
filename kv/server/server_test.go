@@ -57,7 +57,6 @@ func TestRawGet1(t *testing.T) {
 
 	cf := engine_util.CfDefault
 	Set(s, cf, []byte{99}, []byte{42})
-
 	req := &kvrpcpb.RawGetRequest{
 		Key: []byte{99},
 		Cf:  cf,

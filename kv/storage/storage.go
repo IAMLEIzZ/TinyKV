@@ -10,6 +10,7 @@ import (
 type Storage interface {
 	Start() error
 	Stop() error
+	// P1 这里主要需要实现 Write 和 Reader 两个方法
 	Write(ctx *kvrpcpb.Context, batch []Modify) error
 	Reader(ctx *kvrpcpb.Context) (StorageReader, error)
 }
