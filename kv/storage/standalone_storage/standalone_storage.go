@@ -1,7 +1,6 @@
 package standalone_storage
 
 import (
-
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
@@ -16,7 +15,7 @@ import (
 type StandAloneStorage struct {
 	// Your Data Here (1).
 	BadgerDB *badger.DB
-	DBpath string
+	DBpath   string
 }
 
 // storagerader 对象
@@ -26,7 +25,12 @@ type StorageReader struct {
 
 // 从 Txn 中直接获取对应 CF
 func (sr *StorageReader) GetCF(cf string, key []byte) ([]byte, error) {
-	return engine_util.GetCFFromTxn(sr.Txn, cf, key)
+	val, err := engine_util.GetCFFromTxn(sr.Txn, cf, key)
+	// 如果 key 查不到，则返回空的 val，而不是返回错误
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
+	}
+	return val, err
 }
 
 // 获取 CF 迭代器
@@ -45,7 +49,7 @@ func NewStandAloneStorage(conf *config.Config) *StandAloneStorage {
 	badgerDB := engine_util.CreateDB(conf.DBPath, conf.Raft)
 	return &StandAloneStorage{
 		BadgerDB: badgerDB,
-		DBpath: conf.DBPath,
+		DBpath:   conf.DBPath,
 	}
 }
 
@@ -71,7 +75,7 @@ func (s *StandAloneStorage) Stop() error {
 	return nil
 }
 
-// 返回一个 badger 快照，用于后续的数据库 KV 内容读写 
+// 返回一个 badger 快照，用于后续的数据库 KV 内容读写
 func (s *StandAloneStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
 	// Your Code Here (1).
 	// 创建事务 txn
@@ -95,8 +99,8 @@ func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) 
 		case storage.Put:
 			txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), modify.Value())
 		case storage.Delete:
-			// txn.Delete(engine_util.KeyWithCF(modify.Cf(), modify.Key()))
-			txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), nil)
+			txn.Delete(engine_util.KeyWithCF(modify.Cf(), modify.Key()))
+			// txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), nil)
 		}
 	}
 	err := txn.Commit()
