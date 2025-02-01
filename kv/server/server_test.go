@@ -184,16 +184,17 @@ func TestRawDelete1(t *testing.T) {
 	defer s.Stop()
 
 	cf := engine_util.CfDefault
+	// set一对数据
 	assert.Nil(t, Set(s, cf, []byte{99}, []byte{42}))
 
 	req := &kvrpcpb.RawDeleteRequest{
 		Key: []byte{99},
 		Cf:  cf,
 	}
-
+	// 删除数据
 	_, err := server.RawDelete(nil, req)
 	assert.Nil(t, err)
-
+	// 读取数据
 	val, err := Get(s, cf, []byte{99})
 	assert.Equal(t, nil, err)
 	assert.Equal(t, []byte(nil), val)
