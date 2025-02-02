@@ -3,7 +3,7 @@
 ## PartA（Standalone KV）（已完成）
 - 实现一个独立的存储引擎
 - 实现原始的键值服务处理程序
-![alt text](images/image.pngt
+![alt text](images/image.png)
 ## PartB (Raft KV)
 - 实现基本的 Raft 算法
 - 在 Raft 之上构建一个容错的键值服务器
