@@ -100,7 +100,7 @@ func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) 
 			txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), modify.Value())
 		case storage.Delete:
 			txn.Delete(engine_util.KeyWithCF(modify.Cf(), modify.Key()))
-			// txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), nil)
+			// txn.Set(engine_util.KeyWithCF(modify.Cf(), modify.Key()), nil)	
 		}
 	}
 	err := txn.Commit()
