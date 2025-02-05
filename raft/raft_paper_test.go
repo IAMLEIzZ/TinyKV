@@ -196,6 +196,7 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 		}
 
 		if r.State != tt.state {
+			fmt.Println("样例", i)
 			t.Errorf("#%d: state = %s, want %s", i, r.State, tt.state)
 		}
 		if g := r.Term; g != 1 {
@@ -249,6 +250,7 @@ func TestCandidateFallback2AA(t *testing.T) {
 	}
 	for i, tt := range tests {
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
+		// r 变为 candidate
 		r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		if r.State != StateCandidate {
 			t.Fatalf("unexpected state = %s, want %s", r.State, StateCandidate)
@@ -279,7 +281,7 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 	et := 10
 	r := newTestRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	timeouts := make(map[int]bool)
-	for round := 0; round < 50*et; round++ {
+	for round := 0; round < 50 * et; round++ {
 		switch state {
 		case StateFollower:
 			r.becomeFollower(r.Term+1, 2)

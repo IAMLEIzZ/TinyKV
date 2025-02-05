@@ -62,8 +62,10 @@ const (
 	MessageType_MsgAppend MessageType = 3
 	// 'MessageType_MsgAppendResponse' is response to log replication request('MessageType_MsgAppend').
 	MessageType_MsgAppendResponse MessageType = 4
+	// 'MessageType_MsgRequestVote' 请求选票进行选举。
 	// 'MessageType_MsgRequestVote' requests votes for election.
 	MessageType_MsgRequestVote MessageType = 5
+	// 'MessageType_MsgRequestVoteResponse' 包含投票请求的响应。
 	// 'MessageType_MsgRequestVoteResponse' contains responses from voting request.
 	MessageType_MsgRequestVoteResponse MessageType = 6
 	// 'MessageType_MsgSnapshot' requests to install a snapshot message.

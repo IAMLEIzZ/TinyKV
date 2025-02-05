@@ -36,35 +36,32 @@ message Snapshot {
     SnapshotMetadata metadata = 2;
 }
 
-// Some MessageType defined here are local messages which not come from the network, but should
-// also use the Step method to handle
+// 这里定义的一些 MessageType 是本地消息，不来自网络，但也应该使用 Step 方法处理
 enum MessageType {
-    // 'MessageType_MsgHup' is a local message used for election. If an election timeout happened,
-    // the node should pass 'MessageType_MsgHup' to its Step method and start a new election.
+    // 'MessageType_MsgHup' 是用于选举的本地消息。如果发生选举超时，
+    // 节点应将 'MessageType_MsgHup' 传递给其 Step 方法并开始新的选举。
     MsgHup = 0;
-    // 'MessageType_MsgBeat' is a local message that signals the leader to send a heartbeat
-    // of the 'MessageType_MsgHeartbeat' type to its followers.
+    // 'MessageType_MsgBeat' 是一个本地消息，通知领导者向其追随者发送 'MessageType_MsgHeartbeat' 类型的心跳。
     MsgBeat = 1;
-    // 'MessageType_MsgPropose' is a local message that proposes to append data to the leader's log entries.
+    // 'MessageType_MsgPropose' 是一个本地消息，提议将数据追加到领导者的日志条目中。
     MsgPropose = 2;
-    // 'MessageType_MsgAppend' contains log entries to replicate.
+    // 'MessageType_MsgAppend' 包含要复制的日志条目。
     MsgAppend = 3;
-    // 'MessageType_MsgAppendResponse' is response to log replication request('MessageType_MsgAppend').
+    // 'MessageType_MsgAppendResponse' 是对日志复制请求（'MessageType_MsgAppend'）的响应。
     MsgAppendResponse = 4;
-    // 'MessageType_MsgRequestVote' requests votes for election.
+    // 'MessageType_MsgRequestVote' 请求选举投票。
     MsgRequestVote = 5;
-    // 'MessageType_MsgRequestVoteResponse' contains responses from voting request.
+    // 'MessageType_MsgRequestVoteResponse' 包含投票请求的响应。
     MsgRequestVoteResponse = 6;
-    // 'MessageType_MsgSnapshot' requests to install a snapshot message.
+    // 'MessageType_MsgSnapshot' 请求安装快照消息。
     MsgSnapshot = 7;
-    // 'MessageType_MsgHeartbeat' sends heartbeat from leader to its followers.
+    // 'MessageType_MsgHeartbeat' 从领导者发送心跳到其追随者。
     MsgHeartbeat = 8;
-    // 'MessageType_MsgHeartbeatResponse' is a response to 'MessageType_MsgHeartbeat'.
+    // 'MessageType_MsgHeartbeatResponse' 是对 'MessageType_MsgHeartbeat' 的响应。
     MsgHeartbeatResponse = 9;
-    // 'MessageType_MsgTransferLeader' requests the leader to transfer its leadership.
+    // 'MessageType_MsgTransferLeader' 请求领导者转移其领导权。
     MsgTransferLeader = 11;
-    // 'MessageType_MsgTimeoutNow' send from the leader to the leadership transfer target, to let
-    // the transfer target timeout immediately and start a new election.
+    // 'MessageType_MsgTimeoutNow' 从领导者发送到领导权转移目标，让转移目标立即超时并开始新的选举。
     MsgTimeoutNow = 12;
 }
 

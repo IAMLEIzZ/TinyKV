@@ -79,6 +79,8 @@ func TestLeaderElection2AA(t *testing.T) {
 		state   StateType
 		expTerm uint64
 	}{
+		// 创建五个独立的 network
+		// 第一个 network 包含三个 raftnode
 		{newNetworkWithConfig(cfg, nil, nil, nil), StateLeader, 1},
 		{newNetworkWithConfig(cfg, nil, nil, nopStepper), StateLeader, 1},
 		{newNetworkWithConfig(cfg, nil, nopStepper, nopStepper), StateCandidate, 1},
@@ -1486,13 +1488,12 @@ func TestSplitVote2AA(t *testing.T) {
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
 	// simulate leader down. followers start split vote.
+	// leader 宕机
 	nt.isolate(1)
 	nt.send([]pb.Message{
 		{From: 2, To: 2, MsgType: pb.MessageType_MsgHup},
 		{From: 3, To: 3, MsgType: pb.MessageType_MsgHup},
 	}...)
-
-	// check whether the term values are expected
 	// n2.Term == 3
 	// n3.Term == 3
 	sm := nt.peers[2].(*Raft)
@@ -1592,9 +1593,11 @@ func newNetwork(peers ...stateMachine) *network {
 	return newNetworkWithConfig(nil, peers...)
 }
 
+
 // newNetworkWithConfig is like newNetwork but calls the given func to
 // modify the configuration of any state machines it creates.
 func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *network {
+	// peers 长度
 	size := len(peers)
 	peerAddrs := idsBySize(size)
 
@@ -1605,14 +1608,19 @@ func newNetworkWithConfig(configFunc func(*Config), peers ...stateMachine) *netw
 		id := peerAddrs[j]
 		switch v := p.(type) {
 		case nil:
+			// 如果为 nil，则会创建一个空的 memstorage
 			nstorage[id] = NewMemoryStorage()
+			// 创建一个新的 raft 节点配置项
 			cfg := newTestConfig(id, peerAddrs, 10, 1, nstorage[id])
 			if configFunc != nil {
 				configFunc(cfg)
 			}
+			// 通过 cfg 创建 raft 节点
 			sm := newRaft(cfg)
+			// 将该 raft 的 id 加入状态机列表
 			npeers[id] = sm
 		case *Raft:
+			// 如果参数味一个 raft 类型，则直接设置 id 并计入状态机
 			v.id = id
 			npeers[id] = v
 		case *blackHole:
@@ -1633,6 +1641,7 @@ func (nw *network) send(msgs ...pb.Message) {
 	for len(msgs) > 0 {
 		m := msgs[0]
 		p := nw.peers[m.To]
+		//
 		p.Step(m)
 		msgs = append(msgs[1:], nw.filter(p.readMessages())...)
 	}

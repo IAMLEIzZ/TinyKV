@@ -20,45 +20,56 @@ import (
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
+// ErrStepLocalMsg 是在尝试处理本地 Raft 消息时返回的错误。
 // ErrStepLocalMsg is returned when try to step a local raft message
 var ErrStepLocalMsg = errors.New("raft: cannot step raft local message")
 
+// ErrStepPeerNotFound 在尝试处理响应消息时返回, 但在 raft.Prs 中未找到该节点的 peer。
 // ErrStepPeerNotFound is returned when try to step a response message
 // but there is no peer found in raft.Prs for that node.
 var ErrStepPeerNotFound = errors.New("raft: cannot step as peer not found")
 
+// SoftState 提供易失的状态，不需要持久化到 WAL。
 // SoftState provides state that is volatile and does not need to be persisted to the WAL.
 type SoftState struct {
 	Lead      uint64
 	RaftState StateType
 }
 
+// Ready 封装了已准备好读取、保存到稳定存储、提交或发送到其他 peers 的 entries 和 messages。Ready 中的所有字段都是只读的。
 // Ready encapsulates the entries and messages that are ready to read,
 // be saved to stable storage, committed or sent to other peers.
 // All fields in Ready are read-only.
 type Ready struct {
+	// 当前 Node 的易变状态。如果没有更新，SoftState 将为 nil。不需要使用或存储 SoftState。
 	// The current volatile state of a Node.
 	// SoftState will be nil if there is no update.
 	// It is not required to consume or store SoftState.
 	*SoftState
 
+	// 节点的当前状态在消息发送之前保存到稳定存储。如果没有更新，HardState 将等于空状态。
 	// The current state of a Node to be saved to stable storage BEFORE
 	// Messages are sent.
 	// HardState will be equal to empty state if there is no update.
 	pb.HardState
 
+	// Entries 指定在发送 Messages 之前保存到稳定存储的条目。
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
 	Entries []pb.Entry
 
+	// Snapshot 指定要保存到稳定存储的快照。
 	// Snapshot specifies the snapshot to be saved to stable storage.
 	Snapshot pb.Snapshot
 
+	// CommittedEntries 指定要提交到存储/状态机的条目。这些条目之前已提交到稳定存储。
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
 	CommittedEntries []pb.Entry
 
+	// Messages 指定在 Entries 提交到稳定存储后要发送的出站消息。 
+	// 如果它包含 MessageType_MsgSnapshot 消息，应用程序必须通过调用 ReportSnapshot 报告快照已接收或失败。
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.
 	// If it contains a MessageType_MsgSnapshot message, the application MUST report back to raft
@@ -66,23 +77,31 @@ type Ready struct {
 	Messages []pb.Message
 }
 
+// RawNode 是 Raft 的一个包装器。
 // RawNode is a wrapper of Raft.
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
 }
 
+// NewRawNode 返回一个新的 RawNode，给定配置和 raft peers 列表。
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return nil, nil
+	rn := &RawNode{
+		Raft: newRaft(config),
+	}
+
+	return rn, nil
 }
 
+// Tick 将内部逻辑时钟前进一个刻度。
 // Tick advances the internal logical clock by a single tick.
 func (rn *RawNode) Tick() {
 	rn.Raft.tick()
 }
 
+// Campaign 使这个 RawNode 转换到 candidate 状态。
 // Campaign causes this RawNode to transition to candidate state.
 func (rn *RawNode) Campaign() error {
 	return rn.Raft.Step(pb.Message{
@@ -90,6 +109,7 @@ func (rn *RawNode) Campaign() error {
 	})
 }
 
+// Propose 提议将数据附加到 raft 日志。
 // Propose proposes data be appended to the raft log.
 func (rn *RawNode) Propose(data []byte) error {
 	ent := pb.Entry{Data: data}
@@ -99,6 +119,7 @@ func (rn *RawNode) Propose(data []byte) error {
 		Entries: []*pb.Entry{&ent}})
 }
 
+// ProposeConfChange 提议一个配置更改。
 // ProposeConfChange proposes a config change.
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
 	data, err := cc.Marshal()
@@ -112,6 +133,7 @@ func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
 	})
 }
 
+// ApplyConfChange 将配置更改应用到本地节点。
 // ApplyConfChange applies a config change to the local node.
 func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 	if cc.NodeId == None {
@@ -128,6 +150,7 @@ func (rn *RawNode) ApplyConfChange(cc pb.ConfChange) *pb.ConfState {
 	return &pb.ConfState{Nodes: nodes(rn.Raft)}
 }
 
+// Step 使用给定的消息推进状态机。
 // Step advances the state machine using the given message.
 func (rn *RawNode) Step(m pb.Message) error {
 	// ignore unexpected local messages receiving over network
@@ -140,24 +163,30 @@ func (rn *RawNode) Step(m pb.Message) error {
 	return ErrStepPeerNotFound
 }
 
+// Ready 返回此 RawNode 当前时间点的状态。
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{}
+	return Ready{
+		
+	}
 }
 
+// HasReady 在 RawNode 用户需要检查是否有任何 Ready 待处理时调用。
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
 	return false
 }
 
+// Advance 通知 RawNode 应用程序已在上次 Ready 结果中应用并保存了进度。
 // Advance notifies the RawNode that the application has applied and saved progress in the
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
 }
 
+// GetProgress 返回此节点及其对等节点的进度，如果此节点是领导者。
 // GetProgress return the Progress of this node and its peers, if this
 // node is leader.
 func (rn *RawNode) GetProgress() map[uint64]Progress {
@@ -170,6 +199,7 @@ func (rn *RawNode) GetProgress() map[uint64]Progress {
 	return prs
 }
 
+// TransferLeader 尝试将领导权转移给指定的transferee。
 // TransferLeader tries to transfer leadership to the given transferee.
 func (rn *RawNode) TransferLeader(transferee uint64) {
 	_ = rn.Raft.Step(pb.Message{MsgType: pb.MessageType_MsgTransferLeader, From: transferee})
