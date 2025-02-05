@@ -203,6 +203,18 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	// 提醒发送心跳
+	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeat,
+		From: r.id,
+		To: to,
+		Term: r.Term,
+		Index: r.RaftLog.LastIndex(),
+		LogTerm: lt,
+	}
+
+	r.msgs = append(r.msgs, msg)
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -215,8 +227,8 @@ func (r *Raft) tick() {
 		r.electionElapsed ++
 		if r.electionElapsed >= r.electionTimeout{
 			// 设置随机选举时间为 [et, 2 * et - 1]
-			r.electionTimeout = r.et + rand.Intn(r.et + 1)
 			r.electionElapsed = 0
+			r.electionTimeout = r.et + rand.Intn(r.et)
 			r.startElection()
 		}
 	case StateCandidate:
@@ -230,7 +242,7 @@ func (r *Raft) tick() {
 			} else {
 				// 设置随机选举时间为 [et, 2 * et - 1]
 				r.electionElapsed = 0
-				r.electionTimeout = r.et + rand.Intn(r.et + 1)
+				r.electionTimeout = r.et + rand.Intn(r.et)
 				r.startElection()
 			}
 			
@@ -240,6 +252,13 @@ func (r *Raft) tick() {
 		if r.heartbeatElapsed >= r.heartbeatTimeout{
 			// 当心跳计时器到达时，则向初自己外的节点发送心跳
 			r.heartbeatElapsed = 0
+			// leader向自己发送心跳广播提醒{
+			// msg := pb.Message{
+			// 	MsgType: pb.MessageType_MsgBeat,
+			// 	From: r.id,
+			// 	To: r.id,
+			// }
+			// r.msgs = append(r.msgs, msg)
 			for k, _ := range r.votes{
 				if k != r.id{
 					r.sendHeartbeat(k)
@@ -284,6 +303,10 @@ func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
 	r.Term ++
 	r.State = StateCandidate
+	for id := range r.votes {
+        r.votes[id] = false // 清空其他节点的投票记录
+    }
+    r.votes[r.id] = true // 记录自己投了自己
 }
 
 // becomeLeader transform this peer's state to leader
@@ -327,7 +350,12 @@ func (r *Raft) stepFellower(m pb.Message){
 		}
 		return 
 	case pb.MessageType_MsgBeat:
+		return
 	case pb.MessageType_MsgPropose:
+		// 当传递给 follower 时，'MessageType_MsgPropose' 由发送方法存储在 follower 的邮箱（msgs）中。
+		// 它存储了发送者的 ID，稍后由 rafthttp 包转发给领导者。
+		r.msgs = append(r.msgs, m)
+		return
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
@@ -341,7 +369,9 @@ func (r *Raft) stepFellower(m pb.Message){
 		return 
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
+		return 
 	}
 }
 
@@ -356,7 +386,10 @@ func (r *Raft) stepCandidate(m pb.Message){
 		}
 		return 
 	case pb.MessageType_MsgBeat:
+		return
 	case pb.MessageType_MsgPropose:
+		// 当传递给 candidate 时，'MessageType_MsgPropose' 被丢弃。
+		return 
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
@@ -376,21 +409,27 @@ func (r *Raft) stepCandidate(m pb.Message){
 		return 
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
+		return
 	}
 }
 
 func (r *Raft) stepLeader(m pb.Message){
-	if m.Term < r.Term {
-		return 
-	}
 	// 分消息类型处理
 	switch m.MsgType{
 	case pb.MessageType_MsgHup:
 		// Leader 收到选举消息无效
 		return
 	case pb.MessageType_MsgBeat:
+		// 提醒自己发心跳
+		for k, _ := range r.votes{
+			if k != r.id{
+				r.sendHeartbeat(k)
+			}
+		}
 	case pb.MessageType_MsgPropose:
+		r.appendEntry(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
@@ -403,6 +442,33 @@ func (r *Raft) stepLeader(m pb.Message){
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
 	case pb.MessageType_MsgHeartbeatResponse:
+	}
+}
+
+func (r *Raft) appendEntry(m pb.Message) {
+	for _, e := range m.Entries{
+		r.RaftLog.entries = append(r.RaftLog.entries, *e)
+	}
+	r.bcastAppend(m)
+}
+
+func (r *Raft) bcastAppend(m pb.Message) {
+	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		From: r.id,
+		Term: r.Term,
+		Index: r.RaftLog.LastIndex(),
+		LogTerm: lt,
+		Entries: m.Entries,
+	}
+
+	for id, _ := range r.votes{
+		if id != r.id{
+			msg.To = id
+		}
+		r.msgs = append(r.msgs, msg)
 	}
 }
 
@@ -449,10 +515,9 @@ func (r *Raft) sendVote(m pb.Message){
 
 // campagin
 func (r *Raft) startElection() {
-	r.becomeCandidate()
 	// 给自己投票
-	r.votes[r.id] = true
-	// 发送选举消息给每一个节点
+	r.becomeCandidate()
+	// 发送请求投票消息给每一个节点
 	for k, _ := range r.votes{
 		if k == r.id{
 			continue
@@ -478,11 +543,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if m.Term < r.Term{
 		return
 	}
+	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 	// Your Code Here (2A).
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		From: r.id,
 		To: m.From,
+		Index: r.RaftLog.LastIndex(),
+		LogTerm: lt,
 	}
 
 	r.becomeFollower(m.Term, m.From)
@@ -493,6 +561,19 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
+	// 处理心跳
+	if r.Term > m.Term{
+		return
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		From: r.id,
+		To: m.From,
+	}
+	
+	r.becomeFollower(m.Term, m.From)
+	
+	r.msgs = append(r.msgs, msg)
 }
 
 // handleSnapshot handle Snapshot RPC request
