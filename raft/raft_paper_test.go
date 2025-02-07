@@ -281,7 +281,7 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 	et := 10
 	r := newTestRaft(1, []uint64{1, 2, 3}, et, 1, NewMemoryStorage())
 	timeouts := make(map[int]bool)
-	for round := 0; round < 50 * et; round++ {
+	for round := 0; round < 50*et; round++ {
 		switch state {
 		case StateFollower:
 			r.becomeFollower(r.Term+1, 2)
@@ -550,6 +550,7 @@ func TestFollowerCommitEntry2AB(t *testing.T) {
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 		r.becomeFollower(1, 2)
 
+		// Leader-Commited = tt.commit
 		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: 1, Entries: tt.ents, Commit: tt.commit})
 
 		if g := r.RaftLog.committed; g != tt.commit {

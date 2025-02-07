@@ -436,56 +436,60 @@ raft 包以 Protocol Buffer 格式（在 eraftpb 包中定义）发送和接收�
 请注意，每个步骤都由一个共同的方法 'Step' 进行检查，该方法安全地检查节点和传入消息的任期，
 以防止陈旧的日志条目：
 
-	'MessageType_MsgHup' 用于选举。如果节点是 follower 或 candidate，
-	则 'raft' 结构体中的 'tick' 函数设置为 'tickElection'。
-	如果 follower 或 candidate 在选举超时之前没有收到任何心跳，
-	它将 'MessageType_MsgHup' 传递给其 Step 方法，并成为（或保持）candidate 以开始新的选举。
+MessageType_MsgHup
+用于选举。如果一个节点是跟随者（follower）或候选者（candidate），raft 结构体中的 tick 函数会被设置为 tickElection。如果跟随者或候选者在选举超时前没有收到任何心跳，它会将 MessageType_MsgHup 传递给其 Step 方法，并成为（或保持）候选者以开始新一轮选举。
 
-	'MessageType_MsgBeat' 是一个内部类型，用于向领导者发送 'MessageType_MsgHeartbeat' 类型的心跳。
-	如果节点是领导者，则 'raft' 结构体中的 'tick' 函数设置为 'tickHeartbeat'，
-	并触发领导者向其 followers 发送周期性的 'MessageType_MsgHeartbeat' 消息。
+MessageType_MsgBeat
+这是一个内部类型，用于通知领导者发送 MessageType_MsgHeartbeat 类型的心跳。如果一个节点是领导者，raft 结构体中的 tick 函数会被设置为 tickHeartbeat，并触发领导者定期向跟随者发送 MessageType_MsgHeartbeat 消息。
 
-	'MessageType_MsgPropose' 提议将数据附加到其日志条目中。这是一种特殊类型，
-	用于将提议重定向到领导者。因此，发送方法会使用其 HardState 的任期覆盖 eraftpb.Message 的任期，
-	以避免将其本地任期附加到 'MessageType_MsgPropose'。当 'MessageType_MsgPropose' 传递给领导者的 'Step' 方法时，
-	领导者首先调用 'appendEntry' 方法将条目附加到其日志中，
-	然后调用 'bcastAppend' 方法将这些条目发送给其 peers。当传递给 candidate 时，
-	'MessageType_MsgPropose' 被丢弃。当传递给 follower 时，'MessageType_MsgPropose' 由发送方法存储在 follower 的邮箱（msgs）中。
-	它存储了发送者的 ID，稍后由 rafthttp 包转发给领导者。
+MessageType_MsgPropose
+用于提议将数据追加到日志条目中。这是一种特殊类型，用于将提议重定向到领导者。因此，send 方法会用其 HardState 的任期（term）覆盖 eraftpb.Message 的任期，以避免将本地任期附加到 MessageType_MsgPropose 上。当 MessageType_MsgPropose 传递给领导者的 Step 方法时，领导者首先调用 appendEntry 方法将条目追加到其日志中，然后调用 bcastAppend 方法将这些条目发送给其同伴。当传递给候选者时，MessageType_MsgPropose 会被丢弃。当传递给跟随者时，MessageType_MsgPropose 会被 send 方法存储在跟随者的邮箱（msgs）中，并附带发送者的 ID，稍后由 rafthttp 包转发给领导者。
 
-	'MessageType_MsgAppend' 包含要复制的日志条目。领导者调用 bcastAppend，
-	后者调用 sendAppend，后者发送即将复制的日志，类型为 'MessageType_MsgAppend'。
-	当 'MessageType_MsgAppend' 传递给 candidate 的 Step 方法时，candidate 会回退到 follower，
-	因为这表明有一个有效的领导者正在发送 'MessageType_MsgAppend' 消息。Candidate 和 follower 以 'MessageType_MsgAppendResponse' 类型响应此消息。
+MessageType_MsgAppend
+包含需要复制的日志条目。领导者调用 bcastAppend，而 bcastAppend 又调用 sendAppend，后者发送即将被复制的日志，类型为 MessageType_MsgAppend。当 MessageType_MsgAppend 传递给候选者的 Step 方法时，候选者会回退为跟随者，因为这表明有一个有效的领导者正在发送 MessageType_MsgAppend 消息。候选者和跟随者会以 MessageType_MsgAppendResponse 类型的消息来响应此消息。
 
-	'MessageType_MsgAppendResponse' 是对日志复制请求（'MessageType_MsgAppend'）的响应。
-	当 'MessageType_MsgAppend' 传递给 candidate 或 follower 的 Step 方法时，
-	它通过调用 'handleAppendEntries' 方法响应，该方法将 'MessageType_MsgAppendResponse' 发送到 raft 邮箱。
+MessageType_MsgAppendResponse
+是对日志复制请求（MessageType_MsgAppend）的响应。当 MessageType_MsgAppend 传递给候选者或跟随者的 Step 方法时，它们会通过调用 handleAppendEntries 方法来响应，该方法会向 raft 邮箱发送 MessageType_MsgAppendResponse。
 
-	'MessageType_MsgRequestVote' 请求选举投票。当节点是 follower 或 candidate 并且 'MessageType_MsgHup' 传递给其 Step 方法时，
-	节点调用 'campaign' 方法以竞选成为领导者。一旦调用 'campaign' 方法，
-	节点成为 candidate 并向集群中的 peers 发送 'MessageType_MsgRequestVote' 以请求投票。
-	当传递给领导者或 candidate 的 Step 方法并且消息的任期低于领导者或 candidate 的任期时，
-	'MessageType_MsgRequestVote' 将被拒绝（返回 'MessageType_MsgRequestVoteResponse'，Reject 为 true）。
-	如果领导者或 candidate 接收到任期更高的 'MessageType_MsgRequestVote'，它将回退到 follower。
-	当 'MessageType_MsgRequestVote' 传递给 follower 时，只有当发送者的最后任期大于 MessageType_MsgRequestVote 的任期，
-	或者发送者的最后任期等于 MessageType_MsgRequestVote 的任期但发送者的最后提交索引大于或等于 follower 的时，
-	follower 才会投票给发送者。
+MessageType_MsgRequestVote
+用于请求选举投票。当一个节点是跟随者或候选者，并且 MessageType_MsgHup 传递给其 Step 方法时，节点会调用 campaign 方法以竞选成为领导者。一旦调用 campaign 方法，节点会成为候选者并向集群中的同伴发送 MessageType_MsgRequestVote 以请求投票。当传递给领导者或候选者的 Step 方法时，如果消息的任期低于领导者或候选者的任期，MessageType_MsgRequestVote 会被拒绝（返回 MessageType_MsgRequestVoteResponse，且 Reject 为 true）。如果领导者或候选者收到任期更高的 MessageType_MsgRequestVote，它会回退为跟随者。当 MessageType_MsgRequestVote 传递给跟随者时，只有在发送者的最后任期大于 MessageType_MsgRequestVote 的任期，或者发送者的最后任期等于 MessageType_MsgRequestVote 的任期但发送者的最后提交索引大于或等于跟随者的提交索引时，跟随者才会投票给发送者。
 
-	'MessageType_MsgRequestVoteResponse' 包含来自投票请求的响应。当 'MessageType_MsgRequestVoteResponse' 传递给 candidate 时，
-	candidate 计算它赢得了多少票。如果超过多数（法定人数），它将成为领导者并调用 'bcastAppend'。
-	如果 candidate 收到多数拒绝票，它将回退到 follower。
+MessageType_MsgRequestVoteResponse
+包含对投票请求的响应。当 MessageType_MsgRequestVoteResponse 传递给候选者时，候选者会计算它赢得了多少投票。如果超过多数（quorum），它会成为领导者并调用 bcastAppend。如果候选者收到多数拒绝投票，它会回退为跟随者。
 
-	'MessageType_MsgSnapshot' 请求安装快照消息。当节点刚成为领导者或领导者接收到 'MessageType_MsgPropose' 消息时，
-	它调用 'bcastAppend' 方法，然后调用 'sendAppend' 方法向每个 follower 发送。
-	在 'sendAppend' 中，如果领导者无法获取任期或条目，则领导者通过发送 'MessageType_MsgSnapshot' 类型消息请求快照。
+MessageType_MsgSnapshot
+用于请求安装快照消息。当一个节点刚成为领导者或领导者收到 MessageType_MsgPropose 消息时，它会调用 bcastAppend 方法，然后对每个跟随者调用 sendAppend 方法。在 sendAppend 中，如果领导者无法获取任期或条目，它会通过发送 MessageType_MsgSnapshot 类型的消息请求快照。
 
-	'MessageType_MsgHeartbeat' 从领导者发送心跳。当 'MessageType_MsgHeartbeat' 传递给 candidate 并且消息的任期高于 candidate 的任期时，
-	candidate 回退到 follower 并从该心跳中的提交索引更新其提交索引。然后它将消息发送到其邮箱。
-	当 'MessageType_MsgHeartbeat' 传递给 follower 的 Step 方法并且消息的任期高于 follower 的任期时，
-	follower 使用消息中的 ID 更新其 leaderID。
+MessageType_MsgHeartbeat
+用于领导者发送心跳。当 MessageType_MsgHeartbeat 传递给候选者且消息的任期高于候选者的任期时，候选者会回退为跟随者，并从此心跳中更新其提交索引。同时，它会将消息发送到其邮箱。当 MessageType_MsgHeartbeat 传递给跟随者的 Step 方法且消息的任期高于跟随者的任期时，跟随者会使用消息中的 ID 更新其 leaderID。
 
-	'MessageType_MsgHeartbeatResponse' 是对 'MessageType_MsgHeartbeat' 的响应。当 'MessageType_MsgHeartbeatResponse' 传递给领导者的 Step 方法时，
-	领导者知道哪个 follower 响应了。
+MessageType_MsgHeartbeatResponse
+是对 MessageType_MsgHeartbeat 的响应。当 MessageType_MsgHeartbeatResponse 传递给领导者的 Step 方法时，领导者会知道哪个跟随者做出了响应。
 package raft
+*/
+
+/*
+我们设计了 Raft 日志机制，以保持不同服务器上日志之间的高度一致性。这不仅简化了系统的行为并使其更具可预测性，而且是确保安全性的重要组成部分。
+Raft 维护以下属性，这些属性共同构成了图 3 中的 日志匹配属性：
+
+如果两个日志中的条目具有相同的索引和任期，则它们存储相同的命令。
+
+如果两个日志中的条目具有相同的索引和任期，则这两个日志在所有先前的条目中都是相同的。
+
+第一个属性源于一个事实：领导者在给定任期内最多创建一个具有给定日志索引的条目，并且日志条目在日志中的位置永远不会改变。
+第二个属性由 AppendEntries 执行的简单一致性检查保证。在发送 AppendEntries RPC 时，领导者会包含其日志中紧接在新条目之前的条目的索引和任期。
+如果追随者在其日志中找不到具有相同索引和任期的条目，则它会拒绝新条目。一致性检查充当归纳步骤：日志的初始空状态满足日志匹配属性，并且每当日志扩展时，
+一致性检查都会保持日志匹配属性。
+
+在 Raft 中，领导者通过强制追随者的日志复制自己的日志来处理不一致性。这意味着追随者日志中的冲突条目将被领导者日志中的条目覆盖。
+第 5.4 节将表明，在加上一个额外限制的情况下，这是安全的。为了使追随者的日志与自己的日志一致，领导者必须找到两个日志一致的最新日志条目，
+删除追随者日志中该点之后的任何条目，并向追随者发送该点之后的所有领导者条目。所有这些操作都是在 AppendEntries RPC 执行的一致性检查的响应中发生的。
+领导者为每个追随者维护一个 nextIndex，这是领导者将发送给该追随者的下一个日志条目的索引。当领导者首次掌权时，它会将所有 nextIndex 值初始化为其日志
+中最后一个条目之后的索引（图 7 中的 11）。如果追随者的日志与领导者的日志不一致，AppendEntries 一致性检查将在下一次 AppendEntries RPC 中失败。
+在拒绝后，领导者递减 nextIndex 并重试 AppendEntries RPC。最终，nextIndex 将达到领导者日志和追随者日志匹配的点。当这种情况发生时，AppendEntries 将成功，
+这会删除追随者日志中的任何冲突条目，并追加领导者日志中的条目（如果有）。一旦 AppendEntries 成功，追随者的日志将与领导者的日志一致，并且在该任期内将保持这种状态。
+
+如果需要，可以优化协议以减少被拒绝的 AppendEntries RPC 数量。例如，当拒绝 AppendEntries 请求时，追随者可以包含冲突条目的任期以及该任期的第一个索引。
+有了这些信息，领导者可以递减 nextIndex 以跳过该任期中的所有冲突条目；每个具有冲突条目的任期只需要一个 AppendEntries RPC，而不是每个条目一个 RPC。
+在实践中，我们怀疑这种优化是否必要，因为故障很少发生，并且不太可能有许多不一致的条目。
 */

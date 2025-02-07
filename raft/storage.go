@@ -38,19 +38,23 @@ var ErrUnavailable = errors.New("requested entry at index is unavailable")
 // snapshot is temporarily unavailable.
 var ErrSnapshotTemporarilyUnavailable = errors.New("snapshot is temporarily unavailable")
 
+// Storage 是一个接口，应用程序可以实现该接口以从存储中检索日志条目。如果任何 Storage 方法返回错误，raft 实例将变得不可操作并拒绝参与选举；
+// 在这种情况下，应用程序负责清理和恢复。
 // Storage is an interface that may be implemented by the application
 // to retrieve log entries from storage.
-//
 // If any Storage method returns an error, the raft instance will
 // become inoperable and refuse to participate in elections; the
 // application is responsible for cleanup and recovery in this case.
 type Storage interface {
+	// InitialState 返回保存的 HardState 和 ConfState 信息。
 	// InitialState returns the saved HardState and ConfState information.
 	InitialState() (pb.HardState, pb.ConfState, error)
+	// Entries 返回一个在范围 [lo,hi) 内的日志条目的切片。MaxSize 限制返回的日志条目的总大小，但如果有的话，Entries 至少返回一个条目。
 	// Entries returns a slice of log entries in the range [lo,hi).
 	// MaxSize limits the total size of the log entries returned, but
 	// Entries returns at least one entry if any.
 	Entries(lo, hi uint64) ([]pb.Entry, error)
+	// Term 返回条目 i 的 term，必须在 [FirstIndex()-1, LastIndex()] 范围内。即使 FirstIndex 之前的条目可能不可用，该条目的 term 也会保留用于匹配目的。
 	// Term returns the term of entry i, which must be in the range
 	// [FirstIndex()-1, LastIndex()]. The term of the entry before
 	// FirstIndex is retained for matching purposes even though the
@@ -234,6 +238,7 @@ func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 	ms.ents = ents
 	return nil
 }
+
 
 // Append the new entries to storage.
 // TODO (xiangli): ensure the entries are continuous and

@@ -174,14 +174,16 @@ func newRaft(c *Config) *Raft {
 	}
 	// Your Code Here (2A).
 	vote_map := make(map[uint64]bool)
+	prs_map := make(map[uint64]*Progress)
 	for _, id := range c.peers{
 		vote_map[id] = false
+		prs_map[id] = &Progress{Match: 0, Next: 1}
 	}
 
 	raft := &Raft{
 		id: c.ID,
-		RaftLog: new(RaftLog),
-		Prs: make(map[uint64]*Progress, len(c.peers)),
+		RaftLog: newLog(c.Storage), 
+		Prs: prs_map,
 		votes: vote_map,
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout: c.ElectionTick + rand.Intn(c.ElectionTick),
@@ -194,12 +196,6 @@ func newRaft(c *Config) *Raft {
 	return raft
 }
 
-// sendAppend sends an append RPC with new entries (if any) and the
-// current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
-	// Your Code Here (2A).
-	return false
-}
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
@@ -253,13 +249,6 @@ func (r *Raft) tick() {
 		if r.heartbeatElapsed >= r.heartbeatTimeout{
 			// 当心跳计时器到达时，则向初自己外的节点发送心跳
 			r.heartbeatElapsed = 0
-			// leader向自己发送心跳广播提醒{
-			// msg := pb.Message{
-			// 	MsgType: pb.MessageType_MsgBeat,
-			// 	From: r.id,
-			// 	To: r.id,
-			// }
-			// r.msgs = append(r.msgs, msg)
 			for k, _ := range r.votes{
 				if k != r.id{
 					r.sendHeartbeat(k)
@@ -322,7 +311,13 @@ func (r *Raft) becomeLeader() {
 			r.votes[k] = false
 		}
 	}
+	// 成为 leader 后，发送一个空条目
+	ent := pb.Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}
+	
+	r.RaftLog.entries = append(r.RaftLog.entries, ent)
+	r.bcastAppend(pb.Message{})
 }
+
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
@@ -435,6 +430,8 @@ func (r *Raft) stepLeader(m pb.Message){
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
 		// 接收响应 返回
+		// 当领导者接收到 append 响应后，进入 leader 对响应的处理阶段
+		r.handleAppendResponse(m)
 		return 
 	case pb.MessageType_MsgRequestVote:
 		r.sendVote(m) 
@@ -446,30 +443,112 @@ func (r *Raft) stepLeader(m pb.Message){
 	}
 }
 
+// appendEntry leader 将消息加入日志列表中
 func (r *Raft) appendEntry(m pb.Message) {
-	for _, e := range m.Entries{
-		r.RaftLog.entries = append(r.RaftLog.entries, *e)
-	}
+	// for _, e := range m.Entries{
+	// 	// 将消息加入到 entry 中
+	// 	r.RaftLog.entries = append(r.RaftLog.entries, *e)
+	// }
+	// leader 广播日志
 	r.bcastAppend(m)
 }
 
-func (r *Raft) bcastAppend(m pb.Message) {
-	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
-
+// sendAppend sends an append RPC with new entries (if any) and the
+// current commit index to the given peer. Returns true if a message was sent.
+func (r *Raft) sendAppend(to uint64) bool {
+	// Your Code Here (2A).
+	// 要根据每一个成员的进度获取
+	// 从 r 的 storage 中获取日志条目，并且发送
+	// 对应成员的目前日志复制进度，next 是成员希望收到的，-1 代表已经匹配到的 idx
+	prev_idx := r.Prs[to].Next - 1
+	// 获取已经匹配到的日志的 Term
+	prev_term, err := r.RaftLog.Term(prev_idx)
+	if err != nil {
+		return false
+	}
+	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
+	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
+	entries := r.RaftLog.entries[r.Prs[to].Next-r.RaftLog.entries[0].Index:]
+	if err != nil {
+		return false
+	}
+	ents := make([]*pb.Entry, len(entries))
+	for i, _ := range ents {
+		ents[i] = &entries[i]
+	}
+	// 发送消息
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		From: r.id,
+		To: to,
 		Term: r.Term,
-		Index: r.RaftLog.LastIndex(),
-		LogTerm: lt,
-		Entries: m.Entries,
+		Index: prev_idx, 
+		LogTerm: prev_term,
+		Entries: ents,
+		Commit: r.RaftLog.committed,	// 告知成员 Leader 的日志提交进度
 	}
 
+	r.msgs = append(r.msgs, msg)
+
+	return true
+}
+
+// bcastAppend leader 向其他成员广播日志复制
+func (r *Raft) bcastAppend(m pb.Message) {
+
+	// 往 r 中存放日志,存放日志时要按照 lastIndex 的顺序来
+	li := r.RaftLog.LastIndex()
+
+	for _, mes := range m.Entries{
+		mes.Index = li + 1
+		mes.Term = r.Term
+		// 将日志写入内存
+		r.RaftLog.entries = append(r.RaftLog.entries, *mes)
+		r.Prs[r.id].Match = mes.Index
+		r.Prs[r.id].Next = mes.Index + 1
+		li ++
+	}
+	// 节点数不多的时候进行特判断，假设只有两个节点，则直接跟新 r.commited 为 li
+	if len(r.Prs) <= 2{
+		r.RaftLog.committed = r.RaftLog.LastIndex()
+	}
 	for id, _ := range r.votes{
 		if id != r.id{
-			msg.To = id
+			r.sendAppend(id)
 		}
-		r.msgs = append(r.msgs, msg)
+	}
+	
+}
+
+// handleAppendResponse Leader将根据消息排判断是否 commit 某些日志
+// 当大多数节点都复制了某条日志后，则 Leader 可以 commit 这条日志
+func (r *Raft) handleAppendResponse(m pb.Message) {
+	// 如果拒绝，则会缩小对应的 prs
+	if m.Reject {
+		r.Prs[m.From].Match --
+		r.Prs[m.From].Next --
+		return
+	}
+	fellower_match_idx := m.Index
+	fellower_id := m.From
+	r.Prs[fellower_id].Match = fellower_match_idx
+	r.Prs[fellower_id].Next = fellower_match_idx + 1
+	// 统计 commit 日志消息，遍历 r.prs，找到最小的match，然后更新
+	// 是否存在一下情况？idx = 3 的提交已经占了大多数，但是 id = 2 的提交还没有占大多数？（应该不存在）TODO.可能这里有 bug
+	// 每次收到消息都检查一下当前这个消息是不是通过大多数投票，如果通过则 leader 提交？
+	if fellower_match_idx <= r.RaftLog.committed {
+		// 如果当前这个 id < r.Raftlog.committed，则代表该日志早就通过大多数投票被 leader 提交
+		return
+	}
+	vote_num := 0
+	for k, _ := range r.Prs {
+		if r.Prs[k].Match >= fellower_match_idx{
+			vote_num ++
+		}
+	}
+	// 更新 Leader 的 commited
+	if vote_num > (len(r.Prs) / 2){
+		r.RaftLog.committed = fellower_match_idx
 	}
 }
 
@@ -508,6 +587,7 @@ func (r *Raft) sendVote(m pb.Message){
 		// 更新投票
 		r.Vote = m.From
 		// 回退，更新 term
+		r.electionElapsed = 0
 		r.becomeFollower(m.Term, m.From)
 		r.msgs = append(r.msgs, msg)
 		return 
@@ -537,23 +617,87 @@ func (r *Raft) startElection() {
 	r.electionElapsed = 0
 }
 
+// 一致性检查
+func (r *Raft) check(m pb.Message) (bool, int) {
+	idx := 0
+	flag := true
+	prev_term := m.LogTerm
+	prev_index := m.Index
+	if prev_index == 0 && prev_term == 0 {
+		flag = false
+		return flag, idx
+	}
+	for i, ent := range r.RaftLog.entries{
+		//  匹配成功，继续执行
+		if ent.Index == prev_index && ent.Term == prev_term {
+			flag = false
+			idx = i
+			break
+		}
+	}
 
+	return flag, idx
+}
+
+// 当 fellower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// 拒绝比自己 term 小的请求
 	if m.Term < r.Term{
 		return
 	}
-	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
-	// Your Code Here (2A).
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppendResponse,
-		From: r.id,
-		To: m.From,
-		Index: r.RaftLog.LastIndex(),
-		LogTerm: lt,
+	// 这里要做一致性判断，如果发过来的条目的 prev_term 和 next_term 不存在，则会拒绝该消息
+	// 这里要判断一些 term 和 idx 是否合法
+	var msg pb.Message
+	if flag, idx := r.check(m); flag{
+		//	一致性检查不通过，拒绝条目
+		msg = pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			From: r.id,
+			To: m.From,
+			Index: r.RaftLog.LastIndex() + uint64(len(m.Entries)),
+			Commit: r.RaftLog.committed,
+			Term: r.Term,
+			Reject: true,
+		}
+
+	} else {
+		// 删除当前条目后所有的日志，强行与 leader 日志对齐
+		// 检查是否有重复条目，如果有则直接返回，如果没有，如果说发送来的条目与 fellower idx后的日志全部一致，则不管，如果不一致，则删除后部分，再添加新部分
+		i := 0
+		for j := idx + 1; j < len(r.RaftLog.entries) && i < len(m.Entries); j ++ {
+			// 如果不一致
+			if r.RaftLog.entries[j].Term != m.Entries[i].Term || 
+			r.RaftLog.entries[j].Index != m.Entries[i].Index{
+				r.RaftLog.entries = r.RaftLog.entries[: idx + 1]
+				// 复制日志
+				for _, e := range m.Entries{
+					// 将消息加入到 entry 中
+					r.RaftLog.entries = append(r.RaftLog.entries, *e)
+				}
+				break
+			}
+		}
+		// 复制成功，发送通知
+		li := r.RaftLog.LastIndex()
+		lt, _ := r.RaftLog.Term(li)
+	
+		// Your Code Here (2A).
+		// 当得知 Leader 已经提交某些条目，则代表该条目已稳定，可以应用到状态机
+		r.RaftLog.committed = min(m.Commit, li)
+		msg = pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			From: r.id,
+			To: m.From,
+			Index: r.RaftLog.LastIndex() + uint64(len(m.Entries)),
+			LogTerm: lt,
+			Term: r.Term,
+			Commit: r.RaftLog.committed,
+		}
 	}
 
+	
+	r.electionElapsed = 0
 	r.becomeFollower(m.Term, m.From)
 
 	r.msgs = append(r.msgs, msg)
@@ -572,6 +716,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		To: m.From,
 	}
 	
+	// 退化为 fellower，并重置选举时间
+	r.electionElapsed = 0
 	r.becomeFollower(m.Term, m.From)
 	
 	r.msgs = append(r.msgs, msg)
