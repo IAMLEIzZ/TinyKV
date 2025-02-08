@@ -165,6 +165,8 @@ type Raft struct {
 	PendingConfIndex uint64
 
 	et int
+
+	reject_num int
 }
 
 // newRaft return a raft peer with the given config
@@ -200,11 +202,14 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
 	// 提醒发送心跳
+	// 发送心跳的同时，携带日志
+
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeat,
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
+		Commit: r.RaftLog.committed,
 	}
 
 	r.msgs = append(r.msgs, msg)
@@ -282,6 +287,9 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.State = StateFollower
 	r.Term = term
 	r.Lead = lead
+	//	清除投票信息
+	r.reject_num = 0
+	// r.Vote = None
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -308,9 +316,11 @@ func (r *Raft) becomeLeader() {
 		}
 	}
 	// 成为 leader 后，发送一个空条目
-	ent := pb.Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1, Data: nil}
-
+	ent := pb.Entry{Term: r.Term, Index: r.RaftLog.LastIndex() + 1}
 	r.RaftLog.entries = append(r.RaftLog.entries, ent)
+	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
+	r.Prs[r.id].Match = r.Prs[r.id].Next - 1
+	
 	r.bcastAppend(pb.Message{})
 }
 
@@ -391,13 +401,16 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	case pb.MessageType_MsgRequestVoteResponse:
 		// candidate 收到投票响应
 		if m.Reject {
+			r.reject_num ++
+			if r.reject_num * 2 >= len(r.Prs) {
+				r.becomeFollower(r.Term, None)
+			}
 			return
 		}
 		r.votes[m.From] = true
 		if r.canbeLeader() {
 			r.becomeLeader()
 		}
-		return
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
@@ -434,7 +447,9 @@ func (r *Raft) stepLeader(m pb.Message) {
 		return
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
+		return
 	case pb.MessageType_MsgHeartbeatResponse:
+		r.handleHeartbeatResponse(m)
 	}
 }
 
@@ -494,6 +509,7 @@ func (r *Raft) bcastAppend(m pb.Message) {
 	// 往 r 中存放日志,存放日志时要按照 lastIndex 的顺序来
 	li := r.RaftLog.LastIndex()
 
+	// 更新从节点日志复制进度
 	for _, mes := range m.Entries {
 		mes.Index = li + 1
 		mes.Term = r.Term
@@ -504,9 +520,10 @@ func (r *Raft) bcastAppend(m pb.Message) {
 		li++
 	}
 	// 节点数不多的时候进行特判断，假设只有两个节点，则直接跟新 r.commited 为 li
-	if len(r.Prs) <= 2 {
-		r.RaftLog.committed = r.RaftLog.LastIndex()
+	if len(r.Prs) == 1{
+		r.RaftLog.committed = max(r.RaftLog.LastIndex(), r.RaftLog.committed)
 	}
+	
 	for id, _ := range r.votes {
 		if id != r.id {
 			r.sendAppend(id)
@@ -542,8 +559,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		}
 	}
 	// 更新 Leader 的 commited
-	if vote_num > (len(r.Prs) / 2) {
-		r.RaftLog.committed = fellower_match_idx
+	// 只有领导者当前任期的日志条目才会通过计算副本数提交，这个日志才会被通过计算副本数的方式提交
+	log_term, _ := r.RaftLog.Term(m.Index)
+	if vote_num > (len(r.Prs) / 2) && log_term == r.Term{
+		r.RaftLog.committed = max(fellower_match_idx, r.RaftLog.committed)
 		// 更新后再给所有节点发送一个append 请求，用于更新 follower 节点的 commited
 		for k, _ := range r.Prs {
 			if k != r.id {
@@ -564,15 +583,21 @@ func (r *Raft) sendVote(m pb.Message) {
 		To:      m.From,
 		Term:    r.Term,
 	}
-	// 当收到 term 小的消息时，直接拒绝
-	if r.Term >= m.Term && r.State == StateCandidate {
-		msg.Reject = true
-	}
 	// 如果已经投过票，直接拒绝
 	if r.Vote != None {
 		if r.Vote != m.From && r.Term >= m.Term {
 			msg.Reject = true
 		}
+	}
+	// 当收到 term 小的消息时，直接拒绝
+	if r.Term < m.Term {
+		r.becomeFollower(m.Term, None)
+	}
+	// if r.State == StateLeader && r.Term >= m.Term{
+	// 	msg.Reject = true
+	// }
+	if r.Term >= m.Term && r.State == StateCandidate{
+		msg.Reject = true
 	}
 	
 	if r.State == StateFollower {
@@ -734,6 +759,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	if r.Term > m.Term {
 		return
 	}
+	// 处理心跳，append 日志
+	// MessageType_MsgAppend
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		From:    r.id,
@@ -743,6 +770,30 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	// 退化为 fellower，并重置选举时间
 	r.electionElapsed = 0
 	r.becomeFollower(m.Term, m.From)
+
+	r.msgs = append(r.msgs, msg)
+}
+
+// 当 Leader 收到心跳回应时，根据 prs 向发送者发送剩余条目
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+	next_idx := r.Prs[m.From].Next
+	// 发送 next 后的所有条目
+	ents := make([]*pb.Entry, 0)
+	idx := next_idx - r.RaftLog.entries[0].Index
+	for ; idx < uint64(len(r.RaftLog.entries)); idx ++ {
+		ents = append(ents, &r.RaftLog.entries[idx])
+	}
+	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		From: r.id,
+		To: m.From,
+		Term: r.Term,
+		Index: next_idx - 1,
+		LogTerm: lt,
+		Entries: ents,
+		Commit: r.RaftLog.committed,
+	}
 
 	r.msgs = append(r.msgs, msg)
 }
