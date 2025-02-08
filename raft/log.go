@@ -77,7 +77,7 @@ func newLog(storage Storage) *RaftLog {
 		pendingSnapshot: new(pb.Snapshot),
 		committed: 0,
 		applied: 0,
-		stabled: 0,
+		stabled: hi,
 		entries: ents,
 	}
 	return raftlog
@@ -120,12 +120,7 @@ func (l *RaftLog) allEntries() []pb.Entry {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	// 所有未压缩的条目 = 所有 commite 后的条目 = l.entries[l.commit:]
-	// 已经提交的最大索引
-	commite_idx := l.committed
-	offset := l.entries[0].Index
-	ets := l.entries[commite_idx - offset + 1:]
-	return ets
+	return l.entries[l.stabled+1-l.entries[0].Index:]
 }
 
 // nextEnts 返回所有已提交但未应用的 entries
@@ -159,6 +154,9 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if len(l.entries) == 0 {
+		return 0, nil
+	}
 	offset := l.entries[0].Index
 	if i < offset{
 		return 0, nil

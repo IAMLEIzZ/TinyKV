@@ -116,6 +116,7 @@ func TestCandidateStartNewElection2AA(t *testing.T) {
 	testNonleaderStartElection(t, StateCandidate)
 }
 
+/*
 // testNonleaderStartElection tests that if a follower receives no communication
 // over election timeout, it begins an election to choose a new leader. It
 // increments its current term and transitions to candidate state. It then
@@ -126,6 +127,7 @@ func TestCandidateStartNewElection2AA(t *testing.T) {
 // start a new election by incrementing its term and initiating another
 // round of RequestVote RPCs.
 // Reference: section 5.2
+*/
 func testNonleaderStartElection(t *testing.T, state StateType) {
 	// election timeout
 	et := 10
@@ -655,7 +657,7 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 		storage.Append([]pb.Entry{{Term: 1, Index: 1}, {Term: 2, Index: 2}})
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.becomeFollower(2, 2)
-
+		
 		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: tt.lterm, LogTerm: tt.term, Index: tt.index, Entries: tt.ents})
 
 		wents := make([]pb.Entry, 0, len(tt.wents))
@@ -750,7 +752,7 @@ func TestLeaderSyncFollowerLog2AB(t *testing.T) {
 		n.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Term: term + 1})
 
 		n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
-
+		
 		if g := diffu(ltoa(lead.RaftLog), ltoa(follower.RaftLog)); g != "" {
 			t.Errorf("#%d: log diff:\n%s", i, g)
 		}
