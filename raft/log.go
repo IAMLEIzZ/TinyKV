@@ -135,7 +135,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// offset := l.entries[0].Index
 	ents = l.entries[applied_idx: commited_idx]
 	if len(ents) == 0 {
-		return nil
+		return make([]pb.Entry, 0)
 	}
 	return ents
 }

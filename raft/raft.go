@@ -182,6 +182,7 @@ func newRaft(c *Config) *Raft {
 		prs_map[id] = &Progress{Match: 0, Next: 1}
 	}
 	hardstate, _, _ := c.Storage.InitialState()
+	var msg []pb.Message
 	raft := &Raft{
 		id:               c.ID,
 		RaftLog:          newLog(c.Storage),
@@ -191,7 +192,7 @@ func newRaft(c *Config) *Raft {
 		electionTimeout:  c.ElectionTick + rand.Intn(c.ElectionTick),
 		// electionTimeout: 20,
 		State: StateFollower,
-		msgs:  make([]pb.Message, 0),
+		msgs:  msg,
 		Vote:  hardstate.Vote,
 		Term: hardstate.Term,
 		et:    c.ElectionTick,
