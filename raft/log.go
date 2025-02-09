@@ -69,17 +69,20 @@ func newLog(storage Storage) *RaftLog {
 	// Your Code Here (2A).
 	// 从 storage 中拿数据恢复 raftlog
 	// 返回所有
+	hardstate, _, _ := storage.InitialState()
 	fi, _ := storage.FirstIndex()
 	hi, _ := storage.LastIndex()
 	ents, _ := storage.Entries(fi, hi + 1)
+
 	raftlog := &RaftLog{
 		storage: storage,
 		pendingSnapshot: new(pb.Snapshot),
-		committed: 0,
+		committed: hardstate.Commit,
 		applied: 0,
 		stabled: hi,
 		entries: ents,
 	}
+
 	return raftlog
 }
 
