@@ -209,7 +209,7 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		Commit: r.RaftLog.committed,
+		Commit:  r.RaftLog.committed,
 	}
 
 	r.msgs = append(r.msgs, msg)
@@ -320,7 +320,7 @@ func (r *Raft) becomeLeader() {
 	r.RaftLog.entries = append(r.RaftLog.entries, ent)
 	r.Prs[r.id].Next = r.RaftLog.LastIndex() + 1
 	r.Prs[r.id].Match = r.Prs[r.id].Next - 1
-	
+
 	r.bcastAppend(pb.Message{})
 }
 
@@ -401,8 +401,8 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	case pb.MessageType_MsgRequestVoteResponse:
 		// candidate 收到投票响应
 		if m.Reject {
-			r.reject_num ++
-			if r.reject_num * 2 >= len(r.Prs) {
+			r.reject_num++
+			if r.reject_num*2 >= len(r.Prs) {
 				r.becomeFollower(r.Term, None)
 			}
 			return
@@ -520,10 +520,10 @@ func (r *Raft) bcastAppend(m pb.Message) {
 		li++
 	}
 	// 节点数不多的时候进行特判断，假设只有两个节点，则直接跟新 r.commited 为 li
-	if len(r.Prs) == 1{
+	if len(r.Prs) == 1 {
 		r.RaftLog.committed = max(r.RaftLog.LastIndex(), r.RaftLog.committed)
 	}
-	
+
 	for id, _ := range r.votes {
 		if id != r.id {
 			r.sendAppend(id)
@@ -537,8 +537,12 @@ func (r *Raft) bcastAppend(m pb.Message) {
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	// 如果拒绝，则会缩小对应的 prs
 	if m.Reject {
-		r.Prs[m.From].Match--
-		r.Prs[m.From].Next--
+		if r.Prs[m.From].Match > 0 {
+			r.Prs[m.From].Match--
+		}
+		if r.Prs[m.From].Next > 1 {
+			r.Prs[m.From].Next--
+		}
 		return
 	}
 	fellower_match_idx := m.Index
@@ -561,7 +565,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	// 更新 Leader 的 commited
 	// 只有领导者当前任期的日志条目才会通过计算副本数提交，这个日志才会被通过计算副本数的方式提交
 	log_term, _ := r.RaftLog.Term(m.Index)
-	if vote_num > (len(r.Prs) / 2) && log_term == r.Term{
+	if vote_num > (len(r.Prs)/2) && log_term == r.Term {
 		r.RaftLog.committed = max(fellower_match_idx, r.RaftLog.committed)
 		// 更新后再给所有节点发送一个append 请求，用于更新 follower 节点的 commited
 		for k, _ := range r.Prs {
@@ -589,22 +593,22 @@ func (r *Raft) sendVote(m pb.Message) {
 			msg.Reject = true
 		}
 	}
-	// 当收到 term 小的消息时，直接拒绝
+	
 	if r.Term < m.Term {
 		r.becomeFollower(m.Term, None)
 	}
 	// if r.State == StateLeader && r.Term >= m.Term{
 	// 	msg.Reject = true
 	// }
-	if r.Term >= m.Term && r.State == StateCandidate{
+	if r.Term >= m.Term && r.State == StateCandidate {
 		msg.Reject = true
 	}
-	
+
 	if r.State == StateFollower {
 		// 发送者的最后任期等于 MessageType_MsgRequestVote 的任期但发送者的最后提交索引大于或等于 follower 的时，follower 才会投票给发送者。
 		rli := r.RaftLog.LastIndex()
 		rlog_term, _ := r.RaftLog.Term(rli)
-		if rlog_term != m.LogTerm && rlog_term > m.LogTerm{
+		if rlog_term != m.LogTerm && rlog_term > m.LogTerm {
 			// 如果两份日志最后的条目的任期号不同，那么任期号大的日志更加新 paper 5.4.1
 			msg.Reject = true
 		} else if rlog_term == m.LogTerm && rli > m.Index {
@@ -616,7 +620,7 @@ func (r *Raft) sendVote(m pb.Message) {
 		r.msgs = append(r.msgs, msg)
 		return
 	} else {
-		r.becomeFollower(m.Term, m.From)
+		r.becomeFollower(m.Term, None)
 		// 更新投票
 		r.Vote = m.From
 		// 回退，更新 term
@@ -655,7 +659,7 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 	flag := true
 	prev_term := m.LogTerm
 	prev_index := m.Index
-	if prev_index == 0 && prev_term == 0 {
+	if prev_index == 0 {
 		flag = false
 		return flag, idx
 	}
@@ -691,6 +695,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			Term:    r.Term,
 			Reject:  true,
 		}
+		r.msgs = append(r.msgs, msg)
+		r.electionElapsed = 0
+		return
 	} else {
 		// 一致性检查通过
 		// 1. msg 的最后一个条目被囊括，则直接返回成功
@@ -701,18 +708,18 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		k := 0
 		i := match_idx + 1
 		flag := false
-		for ; i < len(r.RaftLog.entries) && k < len(m.Entries); i ++ {
-			if r.RaftLog.entries[i].Index == m.Entries[k].Index && 
-			r.RaftLog.entries[i].Term == m.Entries[k].Term {
+		for ; i < len(r.RaftLog.entries) && k < len(m.Entries); i++ {
+			if r.RaftLog.entries[i].Index == m.Entries[k].Index &&
+				r.RaftLog.entries[i].Term == m.Entries[k].Term {
 				// 条目匹配
-				k ++
+				k++
 				continue
 			} else if r.RaftLog.entries[i].Index == m.Entries[k].Index &&
-			r.RaftLog.entries[i].Term != m.Entries[k].Term {
+				r.RaftLog.entries[i].Term != m.Entries[k].Term {
 				// 条目不匹配，则直接进行覆盖
 				flag = true
 				break
-			} 
+			}
 		}
 		// log的初始长度
 		// len_idx := len(r.RaftLog.entries)
@@ -722,9 +729,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// r.RaftLog.storage.(*MemoryStorage).Append(r.RaftLog.entries[:m.Index - r.RaftLog.entries[0].Index + 1])
 			// r.RaftLog.stabled = m.Index
 			// 从 k 开始追加
-			for ; k < len(m.Entries); k ++{
+			for ; k < len(m.Entries); k++ {
 				r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[k])
-				r.RaftLog.stabled = min(r.RaftLog.stabled,  m.Entries[k].Index - 1)
+				r.RaftLog.stabled = min(r.RaftLog.stabled, m.Entries[k].Index-1)
 			}
 		}
 		if flag {
@@ -733,9 +740,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			// r.RaftLog.storage.(*MemoryStorage).Append(r.RaftLog.entries[:m.Index - r.RaftLog.entries[0].Index + 1])
 			// r.RaftLog.stabled = m.Index
 			r.RaftLog.entries = r.RaftLog.entries[:i]
-			for ; k < len(m.Entries); k ++{
+			for ; k < len(m.Entries); k++ {
 				r.RaftLog.entries = append(r.RaftLog.entries, *m.Entries[k])
-				r.RaftLog.stabled = min(r.RaftLog.stabled,  m.Entries[k].Index - 1)
+				r.RaftLog.stabled = min(r.RaftLog.stabled, m.Entries[k].Index-1)
 			}
 		}
 		msg = pb.Message{
@@ -745,10 +752,18 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			Index:   r.RaftLog.LastIndex(),
 			Commit:  r.RaftLog.committed,
 			Term:    r.Term,
-		}	
+		}
 	}
 	r.electionElapsed = 0
-	r.RaftLog.committed = min(r.RaftLog.LastIndex(), m.Commit)
+	// r.RaftLog.committed = min(r.RaftLog.LastIndex(), m.Commit)
+	// 在 Raft 协议中，跟随者处理 MsgAppend 消息时，committed 的更新需要遵循以下规则：
+	// 1. 不能超过本地日志的最后索引。
+	// 2. 如果没有新条目，committed 只能更新为消息中匹配的索引。
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Index + uint64(len(m.Entries)), m.Commit)
+	} else {
+		r.RaftLog.committed = min(r.RaftLog.committed, m.Commit)
+	}
 	r.msgs = append(r.msgs, msg)
 }
 
@@ -780,19 +795,19 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	// 发送 next 后的所有条目
 	ents := make([]*pb.Entry, 0)
 	idx := next_idx - r.RaftLog.entries[0].Index
-	for ; idx < uint64(len(r.RaftLog.entries)); idx ++ {
+	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
 		ents = append(ents, &r.RaftLog.entries[idx])
 	}
 	lt, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
-		From: r.id,
-		To: m.From,
-		Term: r.Term,
-		Index: next_idx - 1,
+		From:    r.id,
+		To:      m.From,
+		Term:    r.Term,
+		Index:   next_idx - 1,
 		LogTerm: lt,
 		Entries: ents,
-		Commit: r.RaftLog.committed,
+		Commit:  r.RaftLog.committed,
 	}
 
 	r.msgs = append(r.msgs, msg)
