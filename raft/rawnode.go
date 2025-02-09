@@ -233,9 +233,11 @@ func (rn *RawNode) HasReady() bool {
 		}
 	}
 
-	if rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
-		rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit {
-		return true
+	if !isHardStateEqual(rn.pre_hardstate, pb.HardState{}) {
+		if rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
+			rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit {
+			return true
+		}
 	}
 
 	if rn.Raft.RaftLog.pendingSnapshot != nil {
