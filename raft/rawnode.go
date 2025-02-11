@@ -261,6 +261,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	rn.pre_hardstate = rd.HardState
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries) - 1].Index
+		// rn.Raft.RaftLog.committed = rd.Entries[len(rd.Entries) - 1].Index
 	}
 
 	if len(rd.CommittedEntries) > 0 {
