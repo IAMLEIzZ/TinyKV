@@ -22,6 +22,8 @@ import (
 	"github.com/pingcap/errors"
 )
 
+// RaftStorage 是 Storage（参见 tikv/server.go）的一个基于 Raft 节点的实现。它是 Raft 网络的一部分。
+// 通过使用 Raft，读写操作可以与 TinyKV 实例中的其他节点保持一致。
 // RaftStorage is an implementation of `Storage` (see tikv/server.go) backed by a Raft node. It is part of a Raft network.
 // By using Raft, reads and writes are consistent with other nodes in the TinyKV instance.
 type RaftStorage struct {
@@ -57,6 +59,7 @@ func (rs *RaftStorage) checkResponse(resp *raft_cmdpb.RaftCmdResponse, reqCount 
 	return nil
 }
 
+// 创建一个受 raftstore 支持的存储引擎
 // NewRaftStorage creates a new storage engine backed by a raftstore.
 func NewRaftStorage(conf *config.Config) *RaftStorage {
 	dbPath := conf.DBPath
@@ -75,6 +78,7 @@ func NewRaftStorage(conf *config.Config) *RaftStorage {
 	return &RaftStorage{engines: engines, config: conf}
 }
 
+// 写入
 func (rs *RaftStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error {
 	var reqs []*raft_cmdpb.Request
 	for _, m := range batch {
@@ -117,6 +121,7 @@ func (rs *RaftStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error
 	return rs.checkResponse(cb.WaitResp(), len(reqs))
 }
 
+// 读入
 func (rs *RaftStorage) Reader(ctx *kvrpcpb.Context) (storage.StorageReader, error) {
 	header := &raft_cmdpb.RaftRequestHeader{
 		RegionId:    ctx.RegionId,
