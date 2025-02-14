@@ -22,6 +22,8 @@ import (
 	"github.com/pingcap/errors"
 )
 
+// 这个模块是 Raft 模块追加日志进行持久化的模块，主要负责持久化 Raft 日志
+
 type ApplySnapResult struct {
 	// PrevRegion is the region before snapshot applied
 	PrevRegion *metapb.Region

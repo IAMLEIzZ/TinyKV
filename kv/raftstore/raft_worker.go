@@ -30,6 +30,8 @@ func newRaftWorker(ctx *GlobalContext, pm *router) *raftWorker {
 	}
 }
 
+// run 运行 Raft 命令。在每个循环中，Raft 命令通过通道缓冲区进行批处理。
+// 处理完命令后，我们收集来自 peers 的应用消息，制作一个 applyBatch，并将其发送到应用通道。
 // run runs raft commands.
 // On each loop, raft commands are batched by channel buffer.
 // After commands are handled, we collect apply messages by peers, make a applyBatch, send it to apply channel.
@@ -40,20 +42,27 @@ func (rw *raftWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 		msgs = msgs[:0]
 		select {
 		case <-closeCh:
+			// 接收到关闭信号后则直接返回
 			return
 		case msg := <-rw.raftCh:
+			// 消息写入
 			msgs = append(msgs, msg)
 		}
 		pending := len(rw.raftCh)
+		// 按照消息长度，将消息加入消息队列中
 		for i := 0; i < pending; i++ {
 			msgs = append(msgs, <-rw.raftCh)
 		}
+		// peer 的状态 map, peerState 中的 *peer 包含了所有的node，实际上是一个 peer 组
 		peerStateMap := make(map[uint64]*peerState)
+		// 给每一个消息对应的 region 的每一个 peer 分发消息
 		for _, msg := range msgs {
+			// 获取消息对应的 peer 组
 			peerState := rw.getPeerState(peerStateMap, msg.RegionID)
 			if peerState == nil {
 				continue
 			}
+			// 处理消息
 			newPeerMsgHandler(peerState.peer, rw.ctx).HandleMsg(msg)
 		}
 		for _, peerState := range peerStateMap {

@@ -28,6 +28,7 @@ type regionItem struct {
 	region *metapb.Region
 }
 
+// Less 如果 region start key 小于另一个则返回 true。
 // Less returns true if the region start key is less than the other.
 func (r *regionItem) Less(other btree.Item) bool {
 	left := r.region.GetStartKey()
@@ -41,6 +42,7 @@ type storeMeta struct {
 	regionRanges *btree.BTree
 	/// region_id -> region
 	regions map[uint64]*metapb.Region
+	/// 如果这个 store 中现在没有这样的 Region，那么来自新分裂 Region 的 `MsgRequestVote` 消息不应该被丢弃。因此，这些消息会被暂时记录并稍后处理。
 	/// `MsgRequestVote` messages from newly split Regions shouldn't be dropped if there is no
 	/// such Region in this store now. So the messages are recorded temporarily and will be handled later.
 	pendingVotes []*rspb.RaftMessage
@@ -53,6 +55,7 @@ func newStoreMeta() *storeMeta {
 	}
 }
 
+// 设置 region
 func (m *storeMeta) setRegion(region *metapb.Region, peer *peer) {
 	m.regions[region.Id] = region
 	peer.SetRegion(region)
@@ -104,6 +107,8 @@ type Transport interface {
 	Send(msg *rspb.RaftMessage) error
 }
 
+/// loadPeers 加载此存储中的 peers。它扫描 db engine，从中加载所有 regions 及其 peers
+/// 警告：在初始化之前不应使用此存储。
 /// loadPeers loads peers in this store. It scans the db engine, loads all regions and their peers from it
 /// WARN: This store should not be used before initialized.
 func (bs *Raftstore) loadPeers() ([]*peer, error) {
@@ -204,10 +209,10 @@ type Raftstore struct {
 	ctx        *GlobalContext
 	storeState *storeState
 	router     *router
-	workers    *workers
+	workers    *workers  // 存储工作线程的管理，负责调度不同的工作线程（例如分片检查、区域快照处理等）
 	tickDriver *tickDriver
 	closeCh    chan struct{}
-	wg         *sync.WaitGroup
+	wg         *sync.WaitGroup // 用于等待所有工作线程完成任务的同步原语
 }
 
 func (bs *Raftstore) start(
@@ -222,11 +227,13 @@ func (bs *Raftstore) start(
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
+	// 初始化快照管理器
 	err := snapMgr.Init()
 	if err != nil {
 		return err
 	}
 	wg := new(sync.WaitGroup)
+	// create new msg chan
 	bs.workers = &workers{
 		splitCheckWorker: worker.NewWorker("split-check", wg),
 		regionWorker:     worker.NewWorker("snapshot-worker", wg),
@@ -234,6 +241,7 @@ func (bs *Raftstore) start(
 		schedulerWorker:  worker.NewWorker("scheduler-worker", wg),
 		wg:               wg,
 	}
+	// create context
 	bs.ctx = &GlobalContext{
 		cfg:                  cfg,
 		engine:               engines,
@@ -249,14 +257,18 @@ func (bs *Raftstore) start(
 		schedulerClient:      schedulerClient,
 		tickDriverSender:     bs.tickDriver.newRegionCh,
 	}
+	// load bs 中所有的 region 和 peer
 	regionPeers, err := bs.loadPeers()
 	if err != nil {
 		return err
 	}
 
+	// 将每个加载的 Peer 注册到 router 中，允许路由器根据 Peer 来处理请求
 	for _, peer := range regionPeers {
 		bs.router.register(peer)
 	}
+
+	// 启动所有的工作线程，让它们开始处理相应的任务
 	bs.startWorkers(regionPeers)
 	return nil
 }
@@ -266,24 +278,31 @@ func (bs *Raftstore) startWorkers(peers []*peer) {
 	workers := bs.workers
 	router := bs.router
 	bs.wg.Add(2) // raftWorker, storeWorker
+	// 分别启动两个接收器的goroutine
 	rw := newRaftWorker(ctx, router)
 	go rw.run(bs.closeCh, bs.wg)
 	sw := newStoreWorker(ctx, bs.storeState)
 	go sw.run(bs.closeCh, bs.wg)
+	// 向路由发送存储开始的信号
 	router.sendStore(message.Msg{Type: message.MsgTypeStoreStart, Data: ctx.store})
 	for i := 0; i < len(peers); i++ {
+		// 向路由器发送一条消息，通知 regionID 对应的副本开始工作。
 		regionID := peers[i].regionId
 		_ = router.send(regionID, message.Msg{RegionID: regionID, Type: message.MsgTypeStart})
 	}
 	engines := ctx.engine
 	cfg := ctx.cfg
 	workers.splitCheckWorker.Start(runner.NewSplitCheckHandler(engines.Kv, NewRaftstoreRouter(router), cfg))
+	// 启动处理 region 相关工作的 worker
 	workers.regionWorker.Start(runner.NewRegionTaskHandler(engines, ctx.snapMgr))
+	// 启动 raftlog 垃圾回收 
 	workers.raftLogGCWorker.Start(runner.NewRaftLogGCTaskHandler())
 	workers.schedulerWorker.Start(runner.NewSchedulerTaskHandler(ctx.store.Id, ctx.schedulerClient, NewRaftstoreRouter(router)))
+	// 启动一个 goroutine 定时发送心跳等
 	go bs.tickDriver.run()
 }
 
+// 关闭某个 raft 节点 
 func (bs *Raftstore) shutDown() {
 	close(bs.closeCh)
 	bs.wg.Wait()

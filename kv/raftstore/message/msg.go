@@ -18,6 +18,7 @@ const (
 	// message wraps a raft message that should be forwarded to Raft module
 	// the raft message is from peer on other store
 	MsgTypeRaftMessage MsgType = 3
+	// 消息包装一个可能是读/写请求或管理请求的raft命令,该raft命令应该被提议到Raft模块
 	// message wraps a raft command that maybe a read/write request or admin request
 	// the raft command should be proposed to Raft module
 	MsgTypeRaftCmd MsgType = 4

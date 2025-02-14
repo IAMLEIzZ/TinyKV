@@ -102,7 +102,7 @@ func (rs *RaftStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error
 				}})
 		}
 	}
-
+	// 请求消息
 	header := &raft_cmdpb.RaftRequestHeader{
 		RegionId:    ctx.RegionId,
 		Peer:        ctx.Peer,
@@ -114,6 +114,7 @@ func (rs *RaftStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) error
 		Requests: reqs,
 	}
 	cb := message.NewCallback()
+	// 发送请求消息
 	if err := rs.raftRouter.SendRaftCommand(request, cb); err != nil {
 		return err
 	}

@@ -40,7 +40,7 @@ func newStoreState(cfg *config.Config) (chan<- message.Msg, *storeState) {
 	return (chan<- message.Msg)(ch), state
 }
 
-// storeWorker runs store commands.
+// storeWorker 运行 store 命令。
 type storeWorker struct {
 	*storeState
 	ctx *GlobalContext

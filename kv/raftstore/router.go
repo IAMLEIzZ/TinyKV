@@ -11,6 +11,7 @@ import (
 	"github.com/pingcap/errors"
 )
 
+// peerState 包含了需要执行 Raft 命令和应用命令的 peer 状态。
 // peerState contains the peer states that needs to run raft command and apply command.
 type peerState struct {
 	closed uint32
@@ -57,12 +58,15 @@ func (pr *router) close(regionID uint64) {
 	}
 }
 
+// 消息写入 region 的 peer 接收器
 func (pr *router) send(regionID uint64, msg message.Msg) error {
 	msg.RegionID = regionID
+	// 返回对应 region 对应的 peer 组，这里要注意，peer 是一组节点，不是一个 peer
 	p := pr.get(regionID)
 	if p == nil || atomic.LoadUint32(&p.closed) == 1 {
 		return errPeerNotFound
 	}
+	// 消息写入 peer 的通道内
 	pr.peerSender <- msg
 	return nil
 }
@@ -95,6 +99,7 @@ func (r *RaftstoreRouter) SendRaftMessage(msg *raft_serverpb.RaftMessage) error 
 }
 
 func (r *RaftstoreRouter) SendRaftCommand(req *raft_cmdpb.RaftCmdRequest, cb *message.Callback) error {
+	// 消息
 	cmd := &message.MsgRaftCmd{
 		Request:  req,
 		Callback: cb,

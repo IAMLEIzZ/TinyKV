@@ -15,6 +15,7 @@ import (
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/btree"
 	"github.com/pingcap/errors"
+	"golang.org/x/text/cases"
 )
 
 type PeerTick int
@@ -53,6 +54,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 			log.Errorf("%s handle raft message error %v", d.Tag, err)
 		}
 	case message.MsgTypeRaftCmd:
+		// 对应一个读 or 写 or raft 管理命令的一个信息，这个命令应该被提议到 raft 模块
 		raftCMD := msg.Data.(*message.MsgRaftCmd)
 		d.proposeRaftCommand(raftCMD.Request, raftCMD.Callback)
 	case message.MsgTypeTick:
@@ -71,6 +73,7 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 	}
 }
 
+// 检查提议是否合法
 func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) error {
 	// Check store_id, make sure that the msg is dispatched to the right place.
 	if err := util.CheckStoreID(req, d.storeID()); err != nil {
@@ -107,6 +110,7 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+// 将消息提议到对应的 Raft 模块
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
@@ -114,6 +118,26 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	// 获取消息请求头
+	raftrequesthandler := msg.Header
+	msgs := msg.Requests
+	adm_msg := msg.AdminRequest
+	// msgs 不为空
+	if len(msgs) > 0 {
+		// 处理每个消息
+		for _, m := range msgs {
+			d.peer
+		}
+	}
+
+	// 处理 admin 消息
+	switch adm_msg.CmdType {
+	case raft_cmdpb.AdminCmdType_InvalidAdmin:
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+	case raft_cmdpb.AdminCmdType_CompactLog:
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+	case raft_cmdpb.AdminCmdType_Split:
+	}	
 }
 
 func (d *peerMsgHandler) onTick() {

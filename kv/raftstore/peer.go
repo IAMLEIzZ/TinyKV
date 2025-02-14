@@ -63,6 +63,7 @@ type proposal struct {
 	cb    *message.Callback
 }
 
+// 包含了一组 peer，也就是整个 raft 组的所有成员
 type peer struct {
 	// The ticker of the peer, used to trigger
 	// * raft tick
