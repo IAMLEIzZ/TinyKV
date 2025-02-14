@@ -6,6 +6,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 )
 
+// raftWorker 负责运行 Raft 命令并应用 Raft 日志。
 // raftWorker is responsible for run raft commands and apply raft logs.
 type raftWorker struct {
 	pr *router
@@ -13,6 +14,8 @@ type raftWorker struct {
 	// receiver of messages should sent to raft, including:
 	// * raft command from `raftStorage`
 	// * raft inner messages from other peers sent by network
+	// raft worker轮询raftCh以获取消息，包括驱动 Raft 模块的基础 tick 和作为 Raft 条目提议的 Raft 命令
+	// 它从Raft模块获取并处理ready，包括发送Raft消息、持久化状态、将提交的条目应用到状态机
 	raftCh chan message.Msg
 	ctx    *GlobalContext
 

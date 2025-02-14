@@ -54,7 +54,7 @@ type Ready struct {
 	// HardState will be equal to empty state if there is no update.
 	pb.HardState
 
-	// Entries 指定了在消息发送之前需要保存到稳定存储中的日志条目。
+	// 需要写入硬盘的条目
 	// Entries specifies entries to be saved to stable storage BEFORE
 	// Messages are sent.
 	Entries []pb.Entry
@@ -63,13 +63,13 @@ type Ready struct {
 	// Snapshot specifies the snapshot to be saved to stable storage.
 	Snapshot pb.Snapshot
 
-	// CommittedEntries 指定的条目是需要提交到存储或状态机的数据。这些条目在此之前已经被提交到稳定的存储中。
+	// 所有已提交但没有应用的条目
 	// CommittedEntries specifies entries to be committed to a
 	// store/state-machine. These have previously been committed to stable
 	// store.
 	CommittedEntries []pb.Entry
 
-	// Messages 指定在 Entries 提交到稳定存储后要发送的出站消息。 
+	// 需要发送的消息
 	// 如果它包含 MessageType_MsgSnapshot 消息，应用程序必须通过调用 ReportSnapshot 报告快照已接收或失败。
 	// Messages specifies outbound messages to be sent AFTER Entries are
 	// committed to stable storage.

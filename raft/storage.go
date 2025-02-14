@@ -173,6 +173,7 @@ func (ms *MemoryStorage) Snapshot() (pb.Snapshot, error) {
 	return ms.snapshot, nil
 }
 
+// ApplySnapshot 会将此 Storage 对象的内容覆盖为给定快照的内容。
 // ApplySnapshot overwrites the contents of this Storage object with
 // those of the given snapshot.
 func (ms *MemoryStorage) ApplySnapshot(snap pb.Snapshot) error {
@@ -240,6 +241,8 @@ func (ms *MemoryStorage) Compact(compactIndex uint64) error {
 }
 
 
+// 将新条目追加到存储中。
+// TODO (xiangli): 确保条目是连续的，并且 entries[0].Index > ms.entries[0].Index
 // Append the new entries to storage.
 // TODO (xiangli): ensure the entries are continuous and
 // entries[0].Index > ms.entries[0].Index

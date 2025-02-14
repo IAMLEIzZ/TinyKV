@@ -50,6 +50,7 @@ type PeerStorage struct {
 	Tag string
 }
 
+// NewPeerStorage 从存储引擎中获取持久化的 raftState，并返回一个 Peer 存储对象
 // NewPeerStorage get the persist raftState from engines and return a peer storage
 func NewPeerStorage(engines *engine_util.Engines, region *metapb.Region, regionSched chan<- worker.Task, tag string) (*PeerStorage, error) {
 	log.Debugf("%s creating storage for %s", tag, region.String())
@@ -75,6 +76,7 @@ func NewPeerStorage(engines *engine_util.Engines, region *metapb.Region, regionS
 	}, nil
 }
 
+// 初始化 peer 的状态
 func (ps *PeerStorage) InitialState() (eraftpb.HardState, eraftpb.ConfState, error) {
 	raftState := ps.raftState
 	if raft.IsEmptyHardState(*raftState.HardState) {
@@ -86,7 +88,9 @@ func (ps *PeerStorage) InitialState() (eraftpb.HardState, eraftpb.ConfState, err
 	return *raftState.HardState, util.ConfStateFromRegion(ps.region), nil
 }
 
+// 从存储中获取一段 Raft 日志条目
 func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
+	// 检查范围是否合法
 	if err := ps.checkRange(low, high); err != nil || low == high {
 		return nil, err
 	}
@@ -126,6 +130,7 @@ func (ps *PeerStorage) Entries(low, high uint64) ([]eraftpb.Entry, error) {
 	return nil, raft.ErrUnavailable
 }
 
+// 获取某个条目的 Term
 func (ps *PeerStorage) Term(idx uint64) (uint64, error) {
 	if idx == ps.truncatedIndex() {
 		return ps.truncatedTerm(), nil
@@ -143,10 +148,12 @@ func (ps *PeerStorage) Term(idx uint64) (uint64, error) {
 	return entry.Term, nil
 }
 
+// 返回的是当前 db 中的最后一条日志数据
 func (ps *PeerStorage) LastIndex() (uint64, error) {
 	return ps.raftState.LastIndex, nil
 }
 
+// 返回的是最后被提交的日志的索引 + 1
 func (ps *PeerStorage) FirstIndex() (uint64, error) {
 	return ps.truncatedIndex() + 1, nil
 }
@@ -218,6 +225,7 @@ func (ps *PeerStorage) checkRange(low, high uint64) error {
 	return nil
 }
 
+// 返回的是日志中 最后被提交 的条目的索引
 func (ps *PeerStorage) truncatedIndex() uint64 {
 	return ps.applyState.TruncatedState.Index
 }
@@ -254,6 +262,7 @@ func (ps *PeerStorage) clearMeta(kvWB, raftWB *engine_util.WriteBatch) error {
 	return ClearMeta(ps.Engines, kvWB, raftWB, ps.region.Id, ps.raftState.LastIndex)
 }
 
+// 删除所有不被 `new_region` 覆盖的数据。
 // Delete all data that is not covered by `new_region`.
 func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	oldStartKey, oldEndKey := ps.region.GetStartKey(), ps.region.GetEndKey()
@@ -266,6 +275,7 @@ func (ps *PeerStorage) clearExtraData(newRegion *metapb.Region) {
 	}
 }
 
+// ClearMeta 删除过时的元数据，如 raftState、applyState、regionState 和 raft 日志条目。
 // ClearMeta delete stale metadata like raftState, applyState, regionState and raft log entries
 func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatch, regionID uint64, lastIndex uint64) error {
 	start := time.Now()
@@ -304,11 +314,39 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 	return nil
 }
 
+// 将给定的条目追加到 Raft 日志，并更新 ps.raftState，同时删除那些永远不会被提交的日志条目
 // Append the given entries to the raft log and update ps.raftState also delete log entries that will
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	return nil
+	// check
+	en_first_idx := entries[0].Index
+	en_last_idx := entries[len(entries) - 1].Index
+	ps_first_idx, _ := ps.FirstIndex()
+	ps_last_idx, _ := ps.LastIndex()
+	var err error
+	// 检查是否合法
+	// 如果 en_last_idx < ps_first_idx，代表当前这些 entry 已经被 commit ，属于无效的 entry
+	if en_last_idx < ps_first_idx {
+		return nil
+	}
+	// 如果 en_first_idx < ps_first_idx，则需要从 ps_first 处进行提交
+	// eg. ps 5 6 7 8 9
+	//     en 2 3 4 5 6 ==> 应该提交 en 的 5、6，因为 2 3 4 是已经写入的 entry，7，8，9为无效 entry
+	if en_first_idx < ps_first_idx {
+		entries = entries[ps_first_idx - en_first_idx:]
+	}
+	// 为每一个 log 设置 key 和 val
+	for _, e := range entries {
+		err = raftWB.SetMeta(meta.RaftLogKey(ps.region.Id, e.Index), &e)
+	}
+	// 删除所有不会被提交的条目
+	// eg. ps 1 2 3 4 5
+	//     en 1 2 3 4  ==> 则 ps 的 5 为无效的条目
+	for i := en_last_idx + 1; i < ps_last_idx; i ++ {
+		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
+	}
+	return err
 }
 
 // Apply the peer with given snapshot
@@ -326,12 +364,70 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	return nil, nil
 }
 
+// 将内存中的状态保存到磁盘。
+// 在这个函数中不要修改 ready 对象，这是为了后续正确推进 ready 对象的要求。
 // Save memory states to disk.
 // Do not modify ready in this function, this is a requirement to advance the ready object properly later.
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
+	// 提示：你可以在这个函数中调用 `Append()` 和 `ApplySnapshot()`。
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	return nil, nil
+	// 从 Ready 中获取数据
+	/*
+		type Ready struct {
+			*SoftState (Leader & RaftState) RLS-RaftDB
+			pb.HardState (Term & Vote & Commit) RLS
+			Entries []pb.Entry (need to stable storage) RLS
+			Snapshot pb.Snapshot
+			CommittedEntries []pb.Entry (commit but not apply(already stable))
+			Messages []pb.Message 
+		}	
+	*/
+	var applySnap *ApplySnapResult = nil
+	raftWB := new(engine_util.WriteBatch)
+	kvWB := new(engine_util.WriteBatch)
+	// 分别组装 key val 然后提交
+	
+	if raft.IsEmptySnap(&ready.Snapshot) {
+		var err error
+		// 将新快照引用到 storage 中
+		applySnap, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// 把追加的条目写入 raftWB
+	err := ps.Append(ready.Entries, raftWB)
+	if err != nil {
+		return nil, err
+	}
+	// 修改相对应的 RaftLocalState
+	re_len := len(ready.Entries)
+	if re_len != 0 {
+		newlogidx := ready.Entries[re_len - 1].Index
+		newlogterm := ready.Entries[re_len - 1].Term
+		if newlogidx > ps.raftState.LastIndex {
+			ps.raftState.LastIndex = newlogidx
+			ps.raftState.LastTerm = newlogterm
+		}
+	}
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	// RaftLocalstate 写入 raftWB 中
+	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
+	if err != nil {
+		return nil, err
+	}
+	// 状态写入 DB 中
+	err = raftWB.WriteToDB(ps.Engines.Raft)
+	if err != nil {
+		return nil, err
+	}
+	err = kvWB.WriteToDB(ps.Engines.Kv)
+
+	return applySnap, err
 }
 
 func (ps *PeerStorage) ClearData() {
