@@ -222,6 +222,7 @@ func (m *RaftLocalState) GetLastTerm() uint64 {
 
 // Used to store the persistent state for Raft state machine.
 type RaftApplyState struct {
+	// 记录状态机的应用索引，以确保在重启后不会重复应用任何索引。
 	// Record the applied index of the state machine to make sure
 	// not apply any index twice after restart.
 	AppliedIndex uint64 `protobuf:"varint,1,opt,name=applied_index,json=appliedIndex,proto3" json:"applied_index,omitempty"`

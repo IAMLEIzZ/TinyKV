@@ -206,21 +206,24 @@ for {
 
 按照你现在的代码，长时间运行的服务器不可能永远记住完整的 Raft 日志。相反，服务器会检查 Raft 日志的数量，并定期丢弃超过阈值的日志条目。
 
-在这一部分，你将基于上述两部分实现快照处理。通常，快照只是一种像 AppendEntries 一样的 Raft 消息，用于将数据复制到 follower，不同的是它的大小，快照包含某个时间点的整个状态机数据，一次性构建和发送如此大的消息会消耗大量资源和时间，可能会阻塞其他 Raft 消息的处理。为了缓解这个问题，快照消息将使用独立的连接，并将数据分块传输。这就是为什么 TinyKV 服务有一个快照 RPC API。如果你对发送和接收的细节感兴趣，请查看 snapRunner 和参考 https://pingcap.com/blog-cn/tikv-source-code-reading-10/
+在这一部分，你将基于上述两部分实现快照处理。通常，快照只是一种像 AppendEntries 一样的 Raft 消息，用于将数据复制到 follower，不同的是它的大小，快照包含某个时间点的整个状态机数据，一次性构建和发送如此大的消息会消耗大量资源和时间，可能会阻塞其他 Raft 消息的处理。为了缓解这个问题，快照消息将使用独立的连接，并将数据分块传输。这就是为什么 TinyKV 服务有一个快照 RPC API。如果你对发送和接收的细节感兴趣，请查看 `snapRunner` 和参考 <https://pingcap.com/blog-cn/tikv-source-code-reading-10/>
 
 ### 代码
+
 你需要做的所有更改都基于第一部分和第二部分编写的代码。
 
 ### 在 Raft 中实现
-尽管我们需要对快照消息进行一些不同的处理，但从 Raft 算法的角度来看，应该没有区别。参见 proto 文件中 eraftpb.Snapshot 的定义，eraftpb.Snapshot 上的 data 字段并不代表实际的状态机数据，而是一些由上层应用程序使用的元数据，你现在可以忽略它。当领导者需要向 follower 发送快照消息时，它可以调用 Storage.Snapshot() 获取 eraftpb.Snapshot，然后像其他 Raft 消息一样发送快照消息。状态机数据实际如何构建和发送由 raftstore 实现，将在下一步中介绍。你可以假设一旦 Storage.Snapshot() 成功返回，Raft 领导者就可以安全地向 follower 发送快照消息，follower 应调用 handleSnapshot 来处理它，即从消息中的 eraftpb.SnapshotMetadata 恢复 Raft 内部状态，如任期、提交索引和成员信息等，之后，快照处理的流程就完成了。
+
+尽管我们需要对快照消息进行一些不同的处理，但从 Raft 算法的角度来看，应该没有区别。参见 proto 文件中 `eraftpb.Snapshot` 的定义，`eraftpb.Snapshot` 上的 `data` 字段并不代表实际的状态机数据，而是一些由上层应用程序使用的元数据，你现在可以忽略它。当领导者需要向 follower 发送快照消息时，它可以调用 `Storage.Snapshot()` 获取 `eraftpb.Snapshot`，然后像其他 Raft 消息一样发送快照消息。状态机数据实际如何构建和发送由 raftstore 实现，将在下一步中介绍。你可以假设一旦 `Storage.Snapshot()` 成功返回，Raft 领导者就可以安全地向 follower 发送快照消息，follower 应调用 `handleSnapshot` 来处理它，即从消息中的 `eraftpb.SnapshotMetadata` 恢复 Raft 内部状态，如任期、提交索引和成员信息等，之后，快照处理的流程就完成了。
 
 ### 在 raftstore 中实现
+
 在这一步中，你需要学习 raftstore 的两个 worker——raftlog-gc worker 和 region worker。
 
-Raftstore 根据配置 RaftLogGcCountLimit 定期检查是否需要 gc 日志，参见 onRaftGcLogTick()。如果需要，它将提议一个 Raft 管理命令 CompactLogRequest，该命令像项目2第二部分中实现的四种基本命令类型（Get/Put/Delete/Snap）一样包装在 RaftCmdRequest 中。然后你需要在 Raft 提交此管理命令时处理它。但与 Get/Put/Delete/Snap 命令写入或读取状态机数据不同，CompactLogRequest 修改元数据，即更新 RaftApplyState 中的 RaftTruncatedState。之后，你应该通过 ScheduleCompactLog 向 raftlog-gc worker 调度一个任务。Raftlog-gc worker 将异步执行实际的日志删除工作。
+Raftstore 根据配置 `RaftLogGcCountLimit` 定期检查是否需要 gc 日志，参见 `onRaftGcLogTick()`。如果需要，它将提议一个 Raft 管理命令 `CompactLogRequest`，该命令像项目2第二部分中实现的四种基本命令类型（Get/Put/Delete/Snap）一样包装在 `RaftCmdRequest` 中。然后你需要在 Raft 提交此管理命令时处理它。但与 Get/Put/Delete/Snap 命令写入或读取状态机数据不同，`CompactLogRequest` 修改元数据，即更新 `RaftApplyState` 中的 `RaftTruncatedState`。之后，你应该通过 `ScheduleCompactLog` 向 raftlog-gc worker 调度一个任务。Raftlog-gc worker 将异步执行实际的日志删除工作。
 
-然后由于日志压缩，Raft 模块可能需要发送快照。PeerStorage 实现了 Storage.Snapshot()。TinyKV 在 region worker 中生成快照并应用快照。当调用 Snapshot() 时，它实际上向 region worker 发送一个任务 RegionTaskGen。region worker 的消息处理程序位于 kv/raftstore/runner/region_task.go。它扫描底层引擎以生成快照，并通过通道发送快照元数据。下次 Raft 调用 Snapshot 时，它检查快照生成是否完成。如果完成，Raft 应向其他节点发送快照消息，快照的发送和接收工作由 kv/storage/raft_storage/snap_runner.go 处理。你不需要深入了解细节，只需知道快照消息在接收后由 onRaftMsg 处理。
+然后由于日志压缩，Raft 模块可能需要发送快照。`PeerStorage` 实现了 `Storage.Snapshot()`。TinyKV 在 region worker 中生成快照并应用快照。当调用 `Snapshot()` 时，它实际上向 region worker 发送一个任务 `RegionTaskGen`。region worker 的消息处理程序位于 `kv/raftstore/runner/region_task.go`。它扫描底层引擎以生成快照，并通过通道发送快照元数据。下次 Raft 调用 `Snapshot` 时，它检查快照生成是否完成。如果完成，Raft 应向其他节点发送快照消息，快照的发送和接收工作由 `kv/storage/raft_storage/snap_runner.go` 处理。你不需要深入了解细节，只需知道快照消息在接收后由 `onRaftMsg` 处理。
 
-然后快照将反映在下一个 Raft ready 中，因此你需要做的任务是修改 raft ready 处理以处理快照的情况。当你确定要应用快照时，你可以更新 Peer 存储的内存状态，如 RaftLocalState、RaftApplyState 和 RegionLocalState。此外，不要忘记将这些状态持久化到 kvdb 和 raftdb，并从 kvdb 和 raftdb 中删除过时的状态。此外，你还需要将 PeerStorage.snapState 更新为 snap.SnapState_Applying，并通过 PeerStorage.regionSched 向 region worker 发送 runner.RegionTaskApply 任务，并等待 region worker 完成。
+然后快照将反映在下一个 Raft ready 中，因此你需要做的任务是修改 raft ready 处理以处理快照的情况。当你确定要应用快照时，你可以更新 Peer 存储的内存状态，如 `RaftLocalState`、`RaftApplyState` 和 `RegionLocalState`。此外，不要忘记将这些状态持久化到 kvdb 和 raftdb，并从 kvdb 和 raftdb 中删除过时的状态。此外，你还需要将 `PeerStorage.snapState` 更新为 `snap.SnapState_Applying`，并通过 `PeerStorage.regionSched` 向 region worker 发送 `runner.RegionTaskApply` 任务，并等待 region worker 完成。
 
-你应该运行 make project2c 来通过所有测试。
+你应该运行 `make project2c` 来通过所有测试。

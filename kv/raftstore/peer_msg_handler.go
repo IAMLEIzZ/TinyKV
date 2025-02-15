@@ -10,12 +10,12 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
 	"github.com/pingcap-incubator/tinykv/log"
+	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
 	"github.com/pingcap-incubator/tinykv/scheduler/pkg/btree"
 	"github.com/pingcap/errors"
-	"golang.org/x/text/cases"
 )
 
 type PeerTick int
@@ -44,6 +44,24 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	// 处理 reftnode 传来的 Ready 数据，对该应用的条目进行应用，该持久化的持久化，该提交的提交
+	if d.RaftGroup.HasReady() {
+		// 如果有未处理的消息
+		ready := d.RaftGroup.Ready()
+		// 先持久化状态，并获取快照 （处理 hardstate， softstate， entry，snapshot）
+		_, err := d.peerStorage.SaveReadyState(&ready)
+		if err != nil {
+			log.Panic(ErrResp(err))
+			return
+		}
+		// 发送消息 （处理 message）
+		d.Send(d.ctx.trans, ready.Messages)
+		// 处理需要 apply 的消息 （处理 commitedEntry）
+		// 如果是 Get/Put/Delete 消息
+		// ...
+		// 如果是 admin 消息
+		// ...
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -79,7 +97,6 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	if err := util.CheckStoreID(req, d.storeID()); err != nil {
 		return err
 	}
-
 	// Check whether the store has the right peer to handle the request.
 	regionID := d.regionId
 	leaderID := d.LeaderId()
@@ -119,25 +136,101 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// Your Code Here (2B).
 	// 获取消息请求头
-	raftrequesthandler := msg.Header
 	msgs := msg.Requests
 	adm_msg := msg.AdminRequest
 	// msgs 不为空
 	if len(msgs) > 0 {
 		// 处理每个消息
 		for _, m := range msgs {
-			d.peer
+			// 将消息提议到 raft
+			// 获取对应的 key
+			var key []byte
+			switch m.CmdType {
+			case raft_cmdpb.CmdType_Get:
+				key = m.Get.GetKey()
+			case raft_cmdpb.CmdType_Delete:
+				key = m.Delete.GetKey()
+			case raft_cmdpb.CmdType_Put:
+				key = m.Put.GetKey()
+				// check key 是否在当前 region 区间
+				err := util.CheckKeyInRegion(key, d.peerStorage.region)
+				if err != nil {
+					log.Panic(ErrResp(err))
+				}
+				// 获取 term 和 idx
+				p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+				// 加入 proposals 队列
+				d.proposals = append(d.proposals, p)
+				// 消息编码化
+				data, err := m.Marshal()
+				if err != nil {
+					log.Panic(err)
+				}
+				// 发送消息
+				d.RaftGroup.Propose(data)
+			}
 		}
 	}
 
 	// 处理 admin 消息
 	switch adm_msg.CmdType {
-	case raft_cmdpb.AdminCmdType_InvalidAdmin:
 	case raft_cmdpb.AdminCmdType_ChangePeer:
+		// changePeer 消息
+		data, err := msg.Marshal()
+		if err != nil {
+			log.Panic(ErrResp(err))
+		}
+		peerId := msg.AdminRequest.ChangePeer.Peer.Id
+		// 如果是一个 changePeer 请求，代表 confchange，创建 ConfChange 结构体
+		cfchange := eraftpb.ConfChange{
+			ChangeType: msg.AdminRequest.ChangePeer.GetChangeType(),
+			NodeId:     peerId,
+			Context:    data,
+		}
+
+		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		// 发送消息
+		err = d.RaftGroup.ProposeConfChange(cfchange)
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+
 	case raft_cmdpb.AdminCmdType_CompactLog:
+		// CompactLog 作为普通的 entry
+		data, err := msg.Marshal()
+		if err != nil {
+			log.Panic(ErrResp(err))
+		}
+
+		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		d.RaftGroup.Propose(data)
 	case raft_cmdpb.AdminCmdType_TransferLeader:
+		// rawnode.transferleader
+		from_id := msg.AdminRequest.TransferLeader.Peer.Id
+
+		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		d.RaftGroup.TransferLeader(from_id)
 	case raft_cmdpb.AdminCmdType_Split:
-	}	
+		// split 作为普通的 entry
+		data, err := msg.Marshal()
+		if err != nil {
+			log.Panic(ErrResp(err))
+		}
+
+		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+
+		d.RaftGroup.Propose(data)
+	}
+	// 这里要发送消息提议
+	// 向 raft 发送消息, 写入 data
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -247,9 +340,9 @@ func (d *peerMsgHandler) validateRaftMessage(msg *rspb.RaftMessage) bool {
 	return true
 }
 
-/// Checks if the message is sent to the correct peer.
-///
-/// Returns true means that the message can be dropped silently.
+// / Checks if the message is sent to the correct peer.
+// /
+// / Returns true means that the message can be dropped silently.
 func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	fromEpoch := msg.GetRegionEpoch()
 	isVoteMsg := util.IsVoteMessage(msg.Message)

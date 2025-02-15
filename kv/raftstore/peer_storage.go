@@ -52,7 +52,7 @@ type PeerStorage struct {
 	Tag string
 }
 
-// NewPeerStorage 从存储引擎中获取持久化的 raftState，并返回一个 Peer 存储对象
+// NewPeerStorage 从存储引擎中获取持久化的 raftState，并返回一个 Peer 
 // NewPeerStorage get the persist raftState from engines and return a peer storage
 func NewPeerStorage(engines *engine_util.Engines, region *metapb.Region, regionSched chan<- worker.Task, tag string) (*PeerStorage, error) {
 	log.Debugf("%s creating storage for %s", tag, region.String())
@@ -160,6 +160,7 @@ func (ps *PeerStorage) FirstIndex() (uint64, error) {
 	return ps.truncatedIndex() + 1, nil
 }
 
+// 获取当前快照
 func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 	var snapshot eraftpb.Snapshot
 	if ps.snapState.StateType == snap.SnapState_Generating {
@@ -215,19 +216,22 @@ func (ps *PeerStorage) SetRegion(region *metapb.Region) {
 	ps.region = region
 }
 
+// 检查条目的 idx 范围
 func (ps *PeerStorage) checkRange(low, high uint64) error {
 	if low > high {
 		return errors.Errorf("low %d is greater than high %d", low, high)
 	} else if low <= ps.truncatedIndex() {
+		// 代表当前传入的条目有一部分 idx 已经被提交过
 		return raft.ErrCompacted
 	} else if high > ps.raftState.LastIndex+1 {
+		// 代表不是该节点期望的条目 idx 
 		return errors.Errorf("entries' high %d is out of bound, lastIndex %d",
 			high, ps.raftState.LastIndex)
 	}
 	return nil
 }
 
-// 返回的是日志中 最后被提交 的条目的索引
+// 返回的是日志中被截断的条目的 idx 
 func (ps *PeerStorage) truncatedIndex() uint64 {
 	return ps.applyState.TruncatedState.Index
 }
@@ -236,10 +240,12 @@ func (ps *PeerStorage) truncatedTerm() uint64 {
 	return ps.applyState.TruncatedState.Term
 }
 
+// 获取已经应用的最后一个条目的 idx
 func (ps *PeerStorage) AppliedIndex() uint64 {
 	return ps.applyState.AppliedIndex
 }
 
+// 是否是合法的快照
 func (ps *PeerStorage) validateSnap(snap *eraftpb.Snapshot) bool {
 	idx := snap.GetMetadata().GetIndex()
 	if idx < ps.truncatedIndex() {
@@ -351,6 +357,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	return err
 }
 
+// 应用快照
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)

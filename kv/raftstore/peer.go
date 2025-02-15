@@ -42,6 +42,8 @@ func createPeer(storeID uint64, cfg *config.Config, sched chan<- worker.Task,
 	return NewPeer(storeID, cfg, engines, region, sched, metaPeer)
 }
 
+// 该peer可以通过raft成员变更从另一个节点创建，并且在创建这个复制的peer时我们只知道region_id和peer_id，
+// region信息将在应用快照后检索。
 // The peer can be created from another node with raft membership changes, and we only
 // know the region_id and peer_id when creating this replicated peer, the region info
 // will be retrieved later after applying snapshot.
@@ -56,6 +58,7 @@ func replicatePeer(storeID uint64, cfg *config.Config, sched chan<- worker.Task,
 	return NewPeer(storeID, cfg, engines, region, sched, metaPeer)
 }
 
+// 唯一标识一个提议
 type proposal struct {
 	// index + term for unique identification
 	index uint64
@@ -72,8 +75,10 @@ type peer struct {
 	// * split check
 	ticker *ticker
 	// Instance of the Raft module
+	// RawNode 主要是用来收发 Raft masg 的，不涉及存储
 	RaftGroup *raft.RawNode
 	// The peer storage for the Raft module
+	// 涉及持久化存储和条目应用等 
 	peerStorage *PeerStorage
 
 	// Record the meta information of the peer
@@ -111,7 +116,7 @@ type peer struct {
 	// (Used in 3B split)
 	ApproximateSize *uint64
 }
-
+// 创建新 peer
 func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, region *metapb.Region, regionSched chan<- worker.Task,
 	meta *metapb.Peer) (*peer, error) {
 	if meta.GetId() == util.InvalidID {
@@ -180,7 +185,7 @@ func (p *peer) getPeerFromCache(peerID uint64) *metapb.Peer {
 	}
 	return nil
 }
-
+// 获取 raft 希望的下一个 log·-index
 func (p *peer) nextProposalIndex() uint64 {
 	return p.RaftGroup.Raft.RaftLog.LastIndex() + 1
 }
@@ -241,10 +246,12 @@ func (p *peer) storeID() uint64 {
 	return p.Meta.StoreId
 }
 
+// 获取 peer 对应的 region 的信息
 func (p *peer) Region() *metapb.Region {
 	return p.peerStorage.Region()
 }
 
+/// 设置 peer 属于的 region
 /// Set the region of a peer.
 ///
 /// This will update the region of the peer, caller must ensure the region
@@ -265,6 +272,7 @@ func (p *peer) IsLeader() bool {
 	return p.RaftGroup.Raft.State == raft.StateLeader
 }
 
+// peer 发送消息
 func (p *peer) Send(trans Transport, msgs []eraftpb.Message) {
 	for _, msg := range msgs {
 		err := p.sendRaftMessage(msg, trans)
@@ -339,6 +347,7 @@ func (p *peer) MaybeCampaign(parentIsLeader bool) bool {
 	return true
 }
 
+// 返回当前 peer 对应的 raft_node 的 term
 func (p *peer) Term() uint64 {
 	return p.RaftGroup.Raft.Term
 }
@@ -357,6 +366,7 @@ func (p *peer) HeartbeatScheduler(ch chan<- worker.Task) {
 	}
 }
 
+// 向 peer 发送 msg
 func (p *peer) sendRaftMessage(msg eraftpb.Message, trans Transport) error {
 	sendMsg := new(rspb.RaftMessage)
 	sendMsg.RegionId = p.regionId
