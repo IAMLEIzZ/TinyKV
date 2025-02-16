@@ -179,15 +179,14 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+	hardstate, confstate, _ := c.Storage.InitialState()
+	var msg []pb.Message
+	if c.peers == nil {
+		c.peers = confstate.Nodes
+	}
+
 	vote_map := make(map[uint64]bool)
 	prs_map := make(map[uint64]*Progress)
-	for _, id := range c.peers {
-		vote_map[id] = false
-		prs_map[id] = &Progress{Match: 0, Next: 1}
-	}
-	hardstate, _, _ := c.Storage.InitialState()
-	var msg []pb.Message
-
 	raft := &Raft{
 		id:               c.ID,
 		RaftLog:          newLog(c.Storage),
@@ -201,6 +200,11 @@ func newRaft(c *Config) *Raft {
 		Vote:  hardstate.Vote,
 		Term:  hardstate.Term,
 		et:    c.ElectionTick,
+	}
+
+	for _, id := range c.peers {
+		vote_map[id] = false
+		prs_map[id] = &Progress{Match: 0, Next: 1}
 	}
 
 	return raft

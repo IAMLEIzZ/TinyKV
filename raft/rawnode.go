@@ -187,6 +187,9 @@ func (rn *RawNode) Ready() Ready {
 }
 
 func (rn *RawNode) newReady() Ready {
+	if rn == nil {
+		return Ready{}
+	}
 	// 构建新的 Ready 节点
 	rd := Ready{
 		//	返回需要 stable 的条目
@@ -195,7 +198,7 @@ func (rn *RawNode) newReady() Ready {
 		Messages: rn.Raft.msgs,
 	}
 
-	if rn.Raft.Lead != rn.pre_softstate.Lead || rn.Raft.State != rn.pre_softstate.RaftState {
+	if rn.pre_softstate != nil && (rn.Raft.Lead != rn.pre_softstate.Lead || rn.Raft.State != rn.pre_softstate.RaftState) {
 		softstate := &SoftState{
 			Lead: rn.Raft.Lead,
 			RaftState: rn.Raft.State,
@@ -207,8 +210,9 @@ func (rn *RawNode) newReady() Ready {
 		rn.pre_softstate = nil
 	}
 
-	if rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
-	rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit {
+	if !IsEmptyHardState(rn.pre_hardstate) && 
+	(rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
+	rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit) {
 		hardstate := pb.HardState{
 			Term: rn.Raft.Term,
 			Vote: rn.Raft.Vote,

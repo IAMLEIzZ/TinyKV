@@ -396,9 +396,9 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	raftWB := new(engine_util.WriteBatch)
 	kvWB := new(engine_util.WriteBatch)
 	// 分别组装 key val 然后提交
-	
+	var err error
 	if raft.IsEmptySnap(&ready.Snapshot) {
-		var err error
+		
 		// 将新快照引用到 storage 中
 		applySnap, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {
@@ -406,14 +406,15 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		}
 	}
 
-	// 把追加的条目写入 raftWB
-	err := ps.Append(ready.Entries, raftWB)
-	if err != nil {
-		return nil, err
-	}
+
 	// 修改相对应的 RaftLocalState
 	re_len := len(ready.Entries)
+	// 把追加的条目写入 raftWB
 	if re_len != 0 {
+		err = ps.Append(ready.Entries, raftWB)
+		if err != nil {
+			return nil, err
+		}
 		newlogidx := ready.Entries[re_len - 1].Index
 		newlogterm := ready.Entries[re_len - 1].Term
 		if newlogidx > ps.raftState.LastIndex {

@@ -20,9 +20,9 @@ import (
 
 // RaftLog manage the log entries, its struct look like:
 //
-//  snapshot/first.....applied....committed....stabled.....last
-//  --------|------------------------------------------------|
-//                            log entries
+//	snapshot/first.....applied....committed....stabled.....last
+//	--------|------------------------------------------------|
+//	                          log entries
 //
 // for simplify the RaftLog implement should manage all log entries
 // that not truncated
@@ -44,7 +44,7 @@ type RaftLog struct {
 	// Invariant: applied <= committed
 	applied uint64
 
-	// 已经持久化到存储的日志索引	
+	// 已经持久化到存储的日志索引
 	// log entries with index <= stabled are persisted to storage.
 	// It is used to record the logs that are not persisted by storage yet.
 	// Everytime handling `Ready`, the unstabled logs will be included.
@@ -72,15 +72,15 @@ func newLog(storage Storage) *RaftLog {
 	hardstate, _, _ := storage.InitialState()
 	fi, _ := storage.FirstIndex()
 	hi, _ := storage.LastIndex()
-	ents, _ := storage.Entries(fi, hi + 1)
+	ents, _ := storage.Entries(fi, hi+1)
 
 	raftlog := &RaftLog{
-		storage: storage,
+		storage:         storage,
 		pendingSnapshot: new(pb.Snapshot),
-		committed: hardstate.Commit,
-		applied: 0,
-		stabled: hi,
-		entries: ents,
+		committed:       hardstate.Commit,
+		applied:         0,
+		stabled:         hi,
+		entries:         ents,
 	}
 
 	return raftlog
@@ -93,8 +93,8 @@ func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
 }
 
-// allEntries 返回所有未压缩的条目。 
-// 注意，排除任何虚拟条目。 
+// allEntries 返回所有未压缩的条目。
+// 注意，排除任何虚拟条目。
 // 注意，这是你需要实现的测试存根函数之一。
 // allEntries return all the entries not compacted.
 // note, exclude any dummy entries from the return value.
@@ -119,25 +119,44 @@ func (l *RaftLog) allEntries() []pb.Entry {
 	return entries[startIndex:]
 }
 
+func (l *RaftLog) FirstIndex() uint64 {
+	if len(l.entries) == 0 {
+		index, _ := l.storage.FirstIndex()
+		return index
+	}
+	return l.entries[0].Index
+}
+
 // unstableEntries 返回所有不稳定的条目
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return l.entries[l.stabled+1-l.entries[0].Index:]
+		if len(l.entries) > 0 {
+		firstIndex := l.FirstIndex()
+		if l.stabled < firstIndex {
+			return l.entries
+		}
+		if l.stabled-firstIndex >= uint64(len(l.entries)-1) {
+			return make([]pb.Entry, 0)
+		}
+		return l.entries[l.stabled-firstIndex+1:]
+	}
+	return make([]pb.Entry, 0)
 }
 
 // nextEnts 返回所有已提交但未应用的 entries
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	commited_idx := l.committed
-	applied_idx := l.applied
-	// offset := l.entries[0].Index
-	ents = l.entries[applied_idx: commited_idx]
-	if len(ents) == 0 {
-		return make([]pb.Entry, 0)
+	firstIndex := l.FirstIndex()
+	appliedIndex := l.applied
+	commitedIndex := l.committed
+	if len(l.entries) > 0 {
+		if appliedIndex >= firstIndex-1 && commitedIndex >= firstIndex-1 && appliedIndex < commitedIndex && commitedIndex <= l.LastIndex() {
+			return l.entries[appliedIndex-firstIndex+1 : commitedIndex-firstIndex+1]
+		}
 	}
-	return ents
+	return make([]pb.Entry, 0)
 }
 
 // LastIndex 返回日志条目的最后索引
@@ -148,7 +167,7 @@ func (l *RaftLog) LastIndex() uint64 {
 		return 0
 	}
 	offset := int(l.entries[0].Index)
-	li :=  l.entries[len(l.entries) - offset].Index
+	li := l.entries[len(l.entries)-offset].Index
 	// 这里返回的时日志的 idx，而不是数组下标
 	return li
 }
@@ -161,10 +180,10 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 0, nil
 	}
 	offset := l.entries[0].Index
-	if i < offset{
+	if i < offset {
 		return 0, nil
-	} 
+	}
 	// 这里传进来的日志的 idx，而非下标
-	term := l.entries[i - offset].Term
+	term := l.entries[i-offset].Term
 	return term, nil
 }

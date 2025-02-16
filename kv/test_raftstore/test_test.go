@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// 执行 fn，并且在执行结束后，以通道形式告知是否顺利完成
 // a client runs the function f and then signals it is done
 func runClient(t *testing.T, me int, ca chan bool, fn func(me int, t *testing.T)) {
 	ok := false
@@ -28,6 +29,7 @@ func runClient(t *testing.T, me int, ca chan bool, fn func(me int, t *testing.T)
 	ok = true
 }
 
+// 启动多个并发（go runClient）客户端，等待所有客户端执行指定的 fn 完毕后，返回成功与否
 // spawn ncli clients and wait until they are all done
 func SpawnClientsAndWait(t *testing.T, ch chan bool, ncli int, fn func(me int, t *testing.T)) {
 	defer func() { ch <- true }()
@@ -142,6 +144,7 @@ func confchanger(t *testing.T, cluster *Cluster, ch chan bool, done *int32) {
 // - If maxraftlog is a positive number, the count of the persistent log for Raft shouldn't exceed 2*maxraftlog.
 // - If confchange is set, the cluster will schedule random conf change concurrently.
 // - If split is set, split region when size exceed 1024 bytes.
+// GenericTest(t, "2B", 1, false, false, false, -1, false, false)
 func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash bool, partitions bool, maxraftlog int, confchange bool, split bool) {
 	title := "Test: "
 	if unreliable {
@@ -166,19 +169,23 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	}
 	title = title + " (" + part + ")" // 3A or 3B
 
+	// 创建一个五个服务器的测试集群
 	nservers := 5
 	cfg := config.NewTestConfig()
 	if maxraftlog != -1 {
 		cfg.RaftLogGcCountLimit = uint64(maxraftlog)
 	}
+	// 设置 split 参数
 	if split {
 		cfg.RegionMaxSize = 300
 		cfg.RegionSplitSize = 200
 	}
+
 	cluster := NewTestCluster(nservers, cfg)
 	cluster.Start()
 	defer cluster.Shutdown()
 
+	// 计算选举超时时间，并等待足够的时间以确保领导者选举完成。
 	electionTimeout := cfg.RaftBaseTickInterval * time.Duration(cfg.RaftElectionTimeoutTicks)
 	// Wait for leader election
 	time.Sleep(2 * electionTimeout)
@@ -190,13 +197,15 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 	ch_confchange := make(chan bool)
 	ch_clients := make(chan bool)
 	clnts := make([]chan int, nclients)
+	// clnts 数组用于存储每个客户端的操作状态
 	for i := 0; i < nclients; i++ {
 		clnts[i] = make(chan int, 1)
 	}
 	for i := 0; i < 3; i++ {
-		// log.Printf("Iteration %v\n", i)
+		fmt.Printf("Iteration %v\n", i)
 		atomic.StoreInt32(&done_clients, 0)
 		atomic.StoreInt32(&done_partitioner, 0)
+		// 模拟客户端操作
 		go SpawnClientsAndWait(t, ch_clients, nclients, func(cli int, t *testing.T) {
 			j := 0
 			defer func() {
@@ -204,6 +213,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}()
 			last := ""
 			for atomic.LoadInt32(&done_clients) == 0 {
+				// Put 操作
 				if (rand.Int() % 1000) < 500 {
 					key := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					value := "x " + strconv.Itoa(cli) + " " + strconv.Itoa(j) + " y"
@@ -212,6 +222,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					last = NextValue(last, value)
 					j++
 				} else {
+					// Scan 操作
 					start := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", 0)
 					end := strconv.Itoa(cli) + " " + fmt.Sprintf("%08d", j)
 					// log.Infof("%d: client new scan %v-%v\n", cli, start, end)
@@ -234,6 +245,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			time.Sleep(100 * time.Millisecond)
 			go confchanger(t, cluster, ch_confchange, &done_confchanger)
 		}
+		// 让客户端执行操作 5 秒钟后，通知客户端、网络分区和配置变更操作结束。
 		time.Sleep(5 * time.Second)
 		atomic.StoreInt32(&done_clients, 1)     // tell clients to quit
 		atomic.StoreInt32(&done_partitioner, 1) // tell partitioner to quit
@@ -253,6 +265,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 		// log.Printf("wait for clients\n")
 		<-ch_clients
 
+		// 如果设置了 crash，则模拟服务器崩溃。首先停止所有服务器，然后等待选举超时后重新启动所有服务器。
 		if crash {
 			log.Warnf("shutdown servers\n")
 			for i := 1; i <= nservers; i++ {
@@ -268,6 +281,8 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}
 		}
 
+		//time.Sleep(5 * time.Second)
+		// 从每个客户端获取操作结果，并验证它们是否按顺序正确插入和扫描数据
 		for cli := 0; cli < nclients; cli++ {
 			// log.Printf("read from clients %d\n", cli)
 			j := <-clnts[cli]
@@ -287,6 +302,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 			}
 		}
 
+		// 如果设置了 maxraftlog，检查 Raft 日志的大小是否超过了允许的最大值。确保日志在达到最大值后被修剪。
 		if maxraftlog > 0 {
 			time.Sleep(1 * time.Second)
 

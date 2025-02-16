@@ -214,5 +214,13 @@ func (c *NodeSimulator) CallCommandOnStore(storeID uint64, request *raft_cmdpb.R
 	}
 
 	resp := cb.WaitRespWithTimeout(timeout)
+	if resp != nil {
+		if len(resp.Responses) > 0 {
+			if resp.Responses[0].CmdType == raft_cmdpb.CmdType_Invalid {
+				println("++++++++++++++", cb, "shibai")
+				println(resp.Responses[0].CmdType)
+			}
+		}
+	}
 	return resp, cb.Txn
 }
