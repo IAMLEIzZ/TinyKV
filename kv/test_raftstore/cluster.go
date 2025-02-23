@@ -201,6 +201,7 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 		}
 		return resp, txn
 	}
+	fmt.Printf("put key:%s + val:%s request failed\n", reqs[0].Put.Key, reqs[0].Put.Value)
 	panic("request timeout")
 }
 

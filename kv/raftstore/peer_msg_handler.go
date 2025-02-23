@@ -85,13 +85,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				switch m.CmdType {
 				case raft_cmdpb.CmdType_Get:
 				case raft_cmdpb.CmdType_Put:
+					// fmt.Printf("put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
 					kvWB.SetCF(m.Put.Cf, m.Put.Key, m.Put.Value)
 				case raft_cmdpb.CmdType_Delete:
 					kvWB.DeleteCF(m.Delete.Cf, m.Delete.Key)
 				case raft_cmdpb.CmdType_Snap:
 				}
 				// 处理完一条消息后，从 proposal 中完成一条消息
-				if len(d.proposals) > 0 {
+				for len(d.proposals) > 0 {
 					// 取出第一条消息
 					p := d.proposals[0]
 					if p.index < ce.Index {
@@ -100,11 +101,16 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
 						continue
 					}
+					if p.index > ce.Index {
+						// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
+						break
+					}
 					if p.index == ce.Index {
 						// index 匹配
 						if p.term != ce.Term {
 							// term 不匹配，代表已经被覆盖
 							NotifyStaleReq(ce.Term, p.cb)
+							d.proposals = d.proposals[1:]
 						} else {
 							switch m.CmdType {
 							case raft_cmdpb.CmdType_Get:
@@ -121,23 +127,21 @@ func (d *peerMsgHandler) HandleRaftReady() {
 								response.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
 								p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
 								response.CmdType = raft_cmdpb.CmdType_Snap
-								println("==================", p.cb, "shoudao snap", "\n")
 							}
 							resq := &raft_cmdpb.RaftCmdResponse{
 								Header:    header,
 								Responses: make([]*raft_cmdpb.Response, 0),
 							}
 							resq.Responses = append(resq.Responses, response)
-							// print("======", resq.Responses[0].CmdType)
 							p.cb.Done(resq)
+							d.proposals = d.proposals[1:]
 						}
-						d.proposals = d.proposals[1:]
+						break
 					}
 				}
 			}
-
 			// 向 kv 数据库中写入
-			kvWB.WriteToDB(d.ctx.engine.Kv)
+			kvWB.MustWriteToDB(d.ctx.engine.Kv)
 		}
 		d.RaftGroup.Advance(ready)
 	}
@@ -227,6 +231,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		case raft_cmdpb.CmdType_Delete:
 			key = m.Delete.GetKey()
 		case raft_cmdpb.CmdType_Put:
+			// fmt.Printf("msg step put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
 			key = m.Put.GetKey()
 		}
 		// check key 是否在当前 region 区间

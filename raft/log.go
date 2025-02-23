@@ -78,7 +78,7 @@ func newLog(storage Storage) *RaftLog {
 		storage:         storage,
 		pendingSnapshot: new(pb.Snapshot),
 		committed:       hardstate.Commit,
-		applied:         0,
+		applied:         fi - 1,
 		stabled:         hi,
 		entries:         ents,
 	}
@@ -163,13 +163,11 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	if len(l.entries) <= 0 {
-		return 0
+	if len(l.entries) == 0 {
+		index, _ := l.storage.LastIndex()
+		return index
 	}
-	offset := int(l.entries[0].Index)
-	li := l.entries[len(l.entries)-offset].Index
-	// 这里返回的时日志的 idx，而不是数组下标
-	return li
+	return l.entries[len(l.entries)-1].Index
 }
 
 // Term 返回给定索引中条目的 term

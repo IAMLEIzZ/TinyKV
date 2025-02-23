@@ -170,6 +170,7 @@ type Raft struct {
 	et int
 
 	reject_num int
+	heartbeatResp map[uint64]bool
 }
 
 // 创建一个新的 Raft 节点
@@ -200,11 +201,16 @@ func newRaft(c *Config) *Raft {
 		Vote:  hardstate.Vote,
 		Term:  hardstate.Term,
 		et:    c.ElectionTick,
+		heartbeatResp: make(map[uint64]bool),
 	}
 
 	for _, id := range c.peers {
 		vote_map[id] = false
 		prs_map[id] = &Progress{Match: 0, Next: 1}
+	}
+
+	if c.Applied > 0 {
+		raft.RaftLog.applied = c.Applied
 	}
 
 	return raft
@@ -258,6 +264,19 @@ func (r *Raft) tick() {
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
+		hbrNum := len(r.heartbeatResp)
+		total := len(r.Prs)
+		// 选举超时
+		if r.electionElapsed >= r.electionTimeout{
+			r.electionElapsed = 0
+			r.heartbeatResp = make(map[uint64] bool)
+			r.heartbeatResp[r.id] = true
+			// 心跳回应数不超过一半，重新开始选举
+			if hbrNum*2 <= total {
+				r.startElection()
+			}
+		}
+		// 心跳超时
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
 			// 当心跳计时器到达时，则向初自己外的节点发送心跳
 			r.heartbeatElapsed = 0
@@ -442,6 +461,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 	case pb.MessageType_MsgRequestVoteResponse:
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.handleHeartbeatResponse(m)
 	}
@@ -449,7 +469,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
+func (r *Raft) sendAppend(to uint64) {
 	// Your Code Here (2A).
 	// 要根据每一个成员的进度获取
 	// 从 r 的 storage 中获取日志条目，并且发送
@@ -458,14 +478,22 @@ func (r *Raft) sendAppend(to uint64) bool {
 	// 获取已经匹配到的日志的 Term
 	prev_term, err := r.RaftLog.Term(prev_idx)
 	if err != nil {
-		return false
+		return 
 	}
+
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
-	entries := r.RaftLog.entries[prev_idx+1-r.RaftLog.entries[0].Index:]
-	ents := make([]*pb.Entry, len(entries))
-	for i := range ents {
-		ents[i] = &entries[i]
+	firstIndex := r.RaftLog.FirstIndex()
+	// TODO
+	if firstIndex - 1 > prev_idx && prev_idx != 0{
+		return 
+	}
+
+	var ents []*pb.Entry
+	for i := 0; i < len(r.RaftLog.entries); i++ {
+		if r.RaftLog.entries[i].Index >= r.Prs[to].Next {
+			ents = append(ents, &r.RaftLog.entries[i])
+		}
 	}
 
 	// 发送消息
@@ -481,8 +509,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 	}
 
 	r.msgs = append(r.msgs, msg)
-
-	return true
 }
 
 // appendEntry leader 将消息加入日志列表中
@@ -763,7 +789,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			From:    r.id,
 			To:      m_from,
 			Index:   r.RaftLog.LastIndex(),
-			Commit:  r.RaftLog.committed,
 			Term:    r.Term,
 		}
 	}
@@ -777,8 +802,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	m_idx := m.GetIndex()
 	if m_commit > r.RaftLog.committed {
 		r.RaftLog.committed = min(m_idx+uint64(len(m_entries)), m_commit)
-	} else {
-		r.RaftLog.committed = min(r.RaftLog.committed, m_commit)
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -792,6 +815,9 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		return
 	}
 	m_from := m.GetFrom()
+	// 退化为 fellower，并重置选举时间
+	r.electionElapsed = 0
+	r.becomeFollower(m_term, m_from)
 	// 处理心跳，append 日志
 	// MessageType_MsgAppend
 	msg := pb.Message{
@@ -799,39 +825,49 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		From:    r.id,
 		To:      m_from,
 	}
-
-	// 退化为 fellower，并重置选举时间
-	r.electionElapsed = 0
-	r.becomeFollower(m_term, m_from)
-
 	r.msgs = append(r.msgs, msg)
 }
 
 // 当 Leader 收到心跳回应时，根据 prs 向发送者发送剩余条目
-func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-	m_from := m.GetFrom()
-	next_idx := r.Prs[m_from].Next
-	// 发送 next 后的所有条目
-	ents := make([]*pb.Entry, 0)
-	li := r.RaftLog.LastIndex()
-	idx := next_idx - r.RaftLog.entries[0].Index
-	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
-		ents = append(ents, &r.RaftLog.entries[idx])
-	}
-	lt, _ := r.RaftLog.Term(li)
+// func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+// 	m_from := m.GetFrom()
+// 	next_idx := r.Prs[m_from].Next
+// 	// 发送 next 后的所有条目
+// 	ents := make([]*pb.Entry, 0)
+// 	li := r.RaftLog.LastIndex()
+// 	idx := next_idx - r.RaftLog.entries[0].Index
+// 	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
+// 		ents = append(ents, &r.RaftLog.entries[idx])
+// 	}
+// 	lt, _ := r.RaftLog.Term(li)
 
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppend,
-		From:    r.id,
-		To:      m_from,
-		Term:    r.Term,
-		Index:   next_idx - 1,
-		LogTerm: lt,
-		Entries: ents,
-		Commit:  r.RaftLog.committed,
-	}
+// 	msg := pb.Message{
+// 		MsgType: pb.MessageType_MsgAppend,
+// 		From:    r.id,
+// 		To:      m_from,
+// 		Term:    r.Term,
+// 		Index:   next_idx - 1,
+// 		LogTerm: lt,
+// 		Entries: ents,
+// 		Commit:  r.RaftLog.committed,
+// 	}
 
-	r.msgs = append(r.msgs, msg)
+// 	r.msgs = append(r.msgs, msg)
+// }
+
+func (r *Raft) handleHeartbeatResponse(m pb.Message){
+	// 前置，更新 term 和 State
+	if r.Term < m.Term {
+		r.Term = m.Term
+		if r.State != StateFollower {
+			r.becomeFollower(r.Term,None)
+		}
+	}
+	r.heartbeatResp[m.From] = true
+	// 如果节点落后了，append
+	if m.Commit < r.RaftLog.committed {
+		r.sendAppend(m.From)
+	}
 }
 
 // handleSnapshot handle Snapshot RPC request
