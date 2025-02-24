@@ -59,16 +59,17 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.Send(d.ctx.trans, ready.Messages)
 		// 处理需要 apply 的消息 （处理 commitedEntry）
 		// 如果是 Get/Put/Delete 消息
-		for _, ce := range ready.CommittedEntries {
+		for _, en := range ready.CommittedEntries {
 			kvWB := new(engine_util.WriteBatch)
-			msg := new(raft_cmdpb.RaftCmdRequest)
-			err := msg.Unmarshal(ce.Data)
+			req := new(raft_cmdpb.RaftCmdRequest)
+			err := req.Unmarshal(en.Data)
 			if err != nil {
 				log.Panic(ErrResp(err))
 			}
 
-			adminReq := msg.GetAdminRequest()
+			adminReq := req.GetAdminRequest()
 			if adminReq != nil {
+				// 转入 admin 请求处理
 				// admin 请求
 				switch adminReq.CmdType {
 				case raft_cmdpb.AdminCmdType_CompactLog:
@@ -79,72 +80,181 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			}
 
 			// 这里判断是普通请求还是一个 admin 请求 (普通请求和 admin 请求无法同时出现，因此轮询即可)
-			for _, m := range msg.Requests {
-				header := &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}
-				response := &raft_cmdpb.Response{}
-				switch m.CmdType {
-				case raft_cmdpb.CmdType_Get:
-				case raft_cmdpb.CmdType_Put:
-					// fmt.Printf("put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
-					kvWB.SetCF(m.Put.Cf, m.Put.Key, m.Put.Value)
-				case raft_cmdpb.CmdType_Delete:
-					kvWB.DeleteCF(m.Delete.Cf, m.Delete.Key)
-				case raft_cmdpb.CmdType_Snap:
-				}
-				// 处理完一条消息后，从 proposal 中完成一条消息
-				for len(d.proposals) > 0 {
-					// 取出第一条消息
-					p := d.proposals[0]
-					if p.index < ce.Index {
-						// 代表这个 proposal 已经过期
-						d.proposals = d.proposals[1:]
-						p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
-						continue
-					}
-					if p.index > ce.Index {
-						// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，
-						// 因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
-						break
-					}
-					if p.index == ce.Index {
-						// index 匹配
-						if p.term != ce.Term {
-							// term 不匹配，代表已经被覆盖
-							NotifyStaleReq(ce.Term, p.cb)
-							d.proposals = d.proposals[1:]
-						} else {
-							switch m.CmdType {
-							case raft_cmdpb.CmdType_Get:
-								val, _ := engine_util.GetCF(d.ctx.engine.Kv, m.Get.Cf, m.Get.Key)
-								response.Get = &raft_cmdpb.GetResponse{Value: val}
-								response.CmdType = raft_cmdpb.CmdType_Get
-							case raft_cmdpb.CmdType_Put:
-								response.Put = &raft_cmdpb.PutResponse{}
-								response.CmdType = raft_cmdpb.CmdType_Put
-							case raft_cmdpb.CmdType_Delete:
-								response.Delete = &raft_cmdpb.DeleteResponse{}
-								response.CmdType = raft_cmdpb.CmdType_Delete
-							case raft_cmdpb.CmdType_Snap:
-								response.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
-								p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-								response.CmdType = raft_cmdpb.CmdType_Snap
-							}
-							resq := &raft_cmdpb.RaftCmdResponse{
-								Header:    header,
-								Responses: make([]*raft_cmdpb.Response, 0),
-							}
-							resq.Responses = append(resq.Responses, response)
-							p.cb.Done(resq)
-							d.proposals = d.proposals[1:]
-						}
-						break
-					}
-				}
-			}
+			// for _, m := range msg.Requests {
+			// 	header := &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}
+			// 	response := &raft_cmdpb.Response{}
+			// 	switch m.CmdType {
+			// 	case raft_cmdpb.CmdType_Get:
+			// 	case raft_cmdpb.CmdType_Put:
+			// 		// fmt.Printf("put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
+			// 		kvWB.SetCF(m.Put.Cf, m.Put.Key, m.Put.Value)
+			// 	case raft_cmdpb.CmdType_Delete:
+			// 		kvWB.DeleteCF(m.Delete.Cf, m.Delete.Key)
+			// 	case raft_cmdpb.CmdType_Snap:
+			// 	}
+			// 	// 处理完一条消息后，从 proposal 中完成一条消息
+			// 	for len(d.proposals) > 0 {
+			// 		// 取出第一条消息
+			// 		p := d.proposals[0]
+			// 		if p.index < en.Index {
+			// 			// 代表这个 proposal 已经过期
+			// 			d.proposals = d.proposals[1:]
+			// 			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			// 			continue
+			// 		}
+			// 		if p.index > en.Index {
+			// 			// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，
+			// 			// 因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
+			// 			break
+			// 		}
+			// 		if p.index == en.Index {
+			// 			// index 匹配
+			// 			if p.term != en.Term {
+			// 				// term 不匹配，代表已经被覆盖
+			// 				NotifyStaleReq(en.Term, p.cb)
+			// 				d.proposals = d.proposals[1:]
+			// 			} else {
+			// 				switch m.CmdType {
+			// 				case raft_cmdpb.CmdType_Get:
+			// 					val, _ := engine_util.GetCF(d.ctx.engine.Kv, m.Get.Cf, m.Get.Key)
+			// 					response.Get = &raft_cmdpb.GetResponse{Value: val}
+			// 					response.CmdType = raft_cmdpb.CmdType_Get
+			// 				case raft_cmdpb.CmdType_Put:
+			// 					response.Put = &raft_cmdpb.PutResponse{}
+			// 					response.CmdType = raft_cmdpb.CmdType_Put
+			// 				case raft_cmdpb.CmdType_Delete:
+			// 					response.Delete = &raft_cmdpb.DeleteResponse{}
+			// 					response.CmdType = raft_cmdpb.CmdType_Delete
+			// 				case raft_cmdpb.CmdType_Snap:
+			// 					response.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
+			// 					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			// 					response.CmdType = raft_cmdpb.CmdType_Snap
+			// 				}
+			// 				resq := &raft_cmdpb.RaftCmdResponse{
+			// 					Header:    header,
+			// 					Responses: make([]*raft_cmdpb.Response, 0),
+			// 				}
+			// 				resq.Responses = append(resq.Responses, response)
+			// 				p.cb.Done(resq)
+			// 				d.proposals = d.proposals[1:]
+			// 			}
+			// 			break
+			// 		}
+			// 	}
+			// }
+			d.processNormalRequest(req, &en, kvWB)
 			// 向 kv 数据库中写入
 			kvWB.MustWriteToDB(d.ctx.engine.Kv)
 		}
 		d.RaftGroup.Advance(ready)
+	}
+}
+
+// 处理函数回调
+func (d *peerMsgHandler) processProposal(resp *raft_cmdpb.RaftCmdResponse, entry *eraftpb.Entry, isSanpRequest bool) {
+	for len(d.proposals) > 0 {
+		p := d.proposals[0]
+		if p.index < entry.Index {
+			d.proposals = d.proposals[1:]
+			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
+			continue
+		} else if p.index > entry.Index {
+			// 代表该条目已经被启用
+			break
+		} else {
+			if p.term != entry.Term {
+				// term	不匹配，代表被覆盖
+				NotifyStaleReq(entry.Term, p.cb)
+			} else {
+				if isSanpRequest {
+					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				}
+				p.cb.Done(resp)
+			}
+			d.proposals = d.proposals[1:]
+			break
+		}
+	}
+}
+
+// 处理 Put 请求
+func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	// 将请求写入 kvwb 中，后续一次性写入数据库中 MustWriteToDB
+	kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+	// println("put exec" + string(req.Put.Cf) + "_" + string(req.Put.Key) + "_" + string(req.Put.Value))
+	// create response
+	response := &raft_cmdpb.Response{
+		CmdType: raft_cmdpb.CmdType_Put,
+		Put: &raft_cmdpb.PutResponse{},
+	}
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Responses: make([]*raft_cmdpb.Response, 0),
+	}
+	resp.Responses = append(resp.Responses, response)
+	// 处理 proposal 中的函数回调
+	d.processProposal(resp, entry, false)
+}
+
+//	处理 Delete 请求
+func (d *peerMsgHandler) processDelRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	cf, key := req.Delete.Cf, req.Delete.Key
+	kvWB.DeleteCF(cf, key)
+	response := &raft_cmdpb.Response{
+		CmdType: raft_cmdpb.CmdType_Delete,
+		Put: &raft_cmdpb.PutResponse{},
+	}
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Responses: make([]*raft_cmdpb.Response, 0),
+	}
+	resp.Responses = append(resp.Responses, response)
+	d.processProposal(resp, entry, false)
+}
+
+// 处理 Get 请求
+func (d *peerMsgHandler) processGetRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry) {
+	val, _ := engine_util.GetCF(d.ctx.engine.Kv, req.Get.Cf, req.Get.Key)
+	response := &raft_cmdpb.Response{
+		CmdType: raft_cmdpb.CmdType_Get,
+		Get: &raft_cmdpb.GetResponse{Value: val},
+	}
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Responses: make([]*raft_cmdpb.Response, 0),
+	}
+	resp.Responses = append(resp.Responses, response)	
+	d.processProposal(resp, entry, false)
+}
+
+// 处理 Snap 请求
+func (d *peerMsgHandler) processSnapRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	response := &raft_cmdpb.Response{
+		CmdType: raft_cmdpb.CmdType_Snap,
+		Snap: &raft_cmdpb.SnapResponse{Region: d.Region()},
+	}
+	resp := &raft_cmdpb.RaftCmdResponse{
+		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Responses: make([]*raft_cmdpb.Response, 0),
+	}
+	resp.Responses = append(resp.Responses, response)	
+	d.processProposal(resp, entry, true)
+}
+
+// 处理 normal request
+func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	// 对传入的 msg 分别进行判断
+	for _, r := range req.Requests {
+		switch r.CmdType {
+		case raft_cmdpb.CmdType_Put:
+			d.processPutRequest(r, entry, kvWB)
+		case raft_cmdpb.CmdType_Delete:
+			d.processDelRequest(r, entry, kvWB)
+		case raft_cmdpb.CmdType_Get:
+			d.processGetRequest(r, entry)
+		case raft_cmdpb.CmdType_Snap:
+			d.processSnapRequest(r, entry, kvWB)
+		}
 	}
 }
 

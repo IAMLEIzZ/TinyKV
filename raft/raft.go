@@ -272,7 +272,7 @@ func (r *Raft) tick() {
 			r.heartbeatResp = make(map[uint64]bool)
 			r.heartbeatResp[r.id] = true
 			// 心跳回应数不超过一半，重新开始选举
-			if hbrNum*2 <= total {
+			if hbrNum * 2 <= total {
 				r.startElection()
 			}
 		}
@@ -830,46 +830,46 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 // 当 Leader 收到心跳回应时，根据 prs 向发送者发送剩余条目
-// func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-// 	m_from := m.GetFrom()
-// 	next_idx := r.Prs[m_from].Next
-// 	// 发送 next 后的所有条目
-// 	ents := make([]*pb.Entry, 0)
-// 	li := r.RaftLog.LastIndex()
-// 	idx := next_idx - r.RaftLog.entries[0].Index
-// 	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
-// 		ents = append(ents, &r.RaftLog.entries[idx])
-// 	}
-// 	lt, _ := r.RaftLog.Term(li)
-
-// 	msg := pb.Message{
-// 		MsgType: pb.MessageType_MsgAppend,
-// 		From:    r.id,
-// 		To:      m_from,
-// 		Term:    r.Term,
-// 		Index:   next_idx - 1,
-// 		LogTerm: lt,
-// 		Entries: ents,
-// 		Commit:  r.RaftLog.committed,
-// 	}
-
-// 	r.msgs = append(r.msgs, msg)
-// }
-
 func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-	// 前置，更新 term 和 State
-	if r.Term < m.Term {
-		r.Term = m.Term
-		if r.State != StateFollower {
-			r.becomeFollower(r.Term, None)
-		}
+	m_from := m.GetFrom()
+	next_idx := r.Prs[m_from].Next
+	// 发送 next 后的所有条目
+	ents := make([]*pb.Entry, 0)
+	li := r.RaftLog.LastIndex()
+	idx := next_idx - r.RaftLog.entries[0].Index
+	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
+		ents = append(ents, &r.RaftLog.entries[idx])
 	}
-	r.heartbeatResp[m.From] = true
-	// 如果节点落后了，append
-	if m.Commit < r.RaftLog.committed {
-		r.sendAppend(m.From)
+	lt, _ := r.RaftLog.Term(li)
+
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		From:    r.id,
+		To:      m_from,
+		Term:    r.Term,
+		Index:   next_idx - 1,
+		LogTerm: lt,
+		Entries: ents,
+		Commit:  r.RaftLog.committed,
 	}
+
+	r.msgs = append(r.msgs, msg)
 }
+
+// func (r *Raft) handleHeartbeatResponse(m pb.Message) {
+// 	// 前置，更新 term 和 State
+// 	if r.Term < m.Term {
+// 		r.Term = m.Term
+// 		if r.State != StateFollower {
+// 			r.becomeFollower(r.Term, None)
+// 		}
+// 	}
+// 	r.heartbeatResp[m.From] = true
+// 	// 如果节点落后了，append
+// 	if m.Commit < r.RaftLog.committed {
+// 		r.sendAppend(m.From)
+// 	}
+// }
 
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {

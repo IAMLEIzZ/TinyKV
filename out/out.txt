@@ -3,55 +3,55 @@ GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_ra
 === RUN   TestBasic2B
 --- PASS: TestBasic2B (25.06s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	25.780s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	25.848s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestConcurrent2B|| true
 === RUN   TestConcurrent2B
---- PASS: TestConcurrent2B (30.65s)
+--- PASS: TestConcurrent2B (29.73s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	30.931s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	30.096s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestUnreliable2B|| true
 === RUN   TestUnreliable2B
---- PASS: TestUnreliable2B (27.79s)
+--- PASS: TestUnreliable2B (28.43s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	28.111s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	28.866s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestOnePartition2B|| true
 === RUN   TestOnePartition2B
---- PASS: TestOnePartition2B (7.12s)
+--- PASS: TestOnePartition2B (1.94s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	7.382s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	2.451s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestManyPartitionsOneClient2B|| true
 === RUN   TestManyPartitionsOneClient2B
---- PASS: TestManyPartitionsOneClient2B (20.71s)
+--- PASS: TestManyPartitionsOneClient2B (21.33s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	21.060s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	21.707s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestManyPartitionsManyClients2B|| true
 === RUN   TestManyPartitionsManyClients2B
---- PASS: TestManyPartitionsManyClients2B (22.25s)
+--- PASS: TestManyPartitionsManyClients2B (22.73s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	22.564s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	23.085s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestPersistOneClient2B|| true
 === RUN   TestPersistOneClient2B
---- PASS: TestPersistOneClient2B (30.95s)
+--- PASS: TestPersistOneClient2B (32.52s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	31.271s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	33.196s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestPersistConcurrent2B|| true
 === RUN   TestPersistConcurrent2B
---- PASS: TestPersistConcurrent2B (38.36s)
+--- PASS: TestPersistConcurrent2B (38.66s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	38.695s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	39.003s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestPersistConcurrentUnreliable2B|| true
 === RUN   TestPersistConcurrentUnreliable2B
---- PASS: TestPersistConcurrentUnreliable2B (32.44s)
+--- PASS: TestPersistConcurrentUnreliable2B (34.82s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	32.768s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	35.181s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestPersistPartition2B|| true
 === RUN   TestPersistPartition2B
---- PASS: TestPersistPartition2B (28.32s)
+--- PASS: TestPersistPartition2B (27.57s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	28.667s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	27.944s
 GO111MODULE=on go test -v --count=1 --parallel=1 -p=1 -timeout 120s ./kv/test_raftstore -run ^TestPersistPartitionUnreliable2B|| true
 === RUN   TestPersistPartitionUnreliable2B
---- PASS: TestPersistPartitionUnreliable2B (27.51s)
+--- PASS: TestPersistPartitionUnreliable2B (26.63s)
 PASS
-ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	27.869s
+ok  	github.com/pingcap-incubator/tinykv/kv/test_raftstore	26.984s
 rm -rf /tmp/*test-raftstore*
