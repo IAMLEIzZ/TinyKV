@@ -169,7 +169,7 @@ type Raft struct {
 
 	et int
 
-	reject_num int
+	reject_num    int
 	heartbeatResp map[uint64]bool
 }
 
@@ -196,11 +196,11 @@ func newRaft(c *Config) *Raft {
 		heartbeatTimeout: c.HeartbeatTick,
 		electionTimeout:  c.ElectionTick + rand.Intn(c.ElectionTick),
 		// electionTimeout: 20,
-		State: StateFollower,
-		msgs:  msg,
-		Vote:  hardstate.Vote,
-		Term:  hardstate.Term,
-		et:    c.ElectionTick,
+		State:         StateFollower,
+		msgs:          msg,
+		Vote:          hardstate.Vote,
+		Term:          hardstate.Term,
+		et:            c.ElectionTick,
 		heartbeatResp: make(map[uint64]bool),
 	}
 
@@ -238,7 +238,7 @@ func (r *Raft) tick() {
 	// 对于 follower 和 candidate 和 leader 要处理的 tick 是不同的
 	switch r.State {
 	case StateFollower:
-		// fellower 要处理 electionTick，当 electionTimeout 来临时，开始选举
+		// follower 要处理 electionTick，当 electionTimeout 来临时，开始选举
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout {
 			// 设置随机选举时间为 [et, 2 * et - 1]
@@ -267,9 +267,9 @@ func (r *Raft) tick() {
 		hbrNum := len(r.heartbeatResp)
 		total := len(r.Prs)
 		// 选举超时
-		if r.electionElapsed >= r.electionTimeout{
+		if r.electionElapsed >= r.electionTimeout {
 			r.electionElapsed = 0
-			r.heartbeatResp = make(map[uint64] bool)
+			r.heartbeatResp = make(map[uint64]bool)
 			r.heartbeatResp[r.id] = true
 			// 心跳回应数不超过一半，重新开始选举
 			if hbrNum*2 <= total {
@@ -304,7 +304,7 @@ func (r *Raft) canbeLeader() bool {
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
 	r.State = StateFollower
-	// 一个 fellower 在一个任期内只能给同一个人投票
+	// 一个 follower 在一个任期内只能给同一个人投票
 	if r.Term != term {
 		r.Vote = None
 	}
@@ -361,7 +361,7 @@ func (r *Raft) Step(m pb.Message) error {
 	// 当收到消息时，分角色筛选，进入不同的 step
 	switch r.State {
 	case StateFollower:
-		r.stepFellower(m)
+		r.stepFollower(m)
 	case StateCandidate:
 		r.stepCandidate(m)
 	case StateLeader:
@@ -370,11 +370,11 @@ func (r *Raft) Step(m pb.Message) error {
 	return nil
 }
 
-func (r *Raft) stepFellower(m pb.Message) {
+func (r *Raft) stepFollower(m pb.Message) {
 	// 分消息类型处理
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		// fellower 进行选举
+		// follower 进行选举
 		r.startElection()
 	case pb.MessageType_MsgBeat:
 	case pb.MessageType_MsgPropose:
@@ -385,17 +385,18 @@ func (r *Raft) stepFellower(m pb.Message) {
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
-		// fellower 不会收到该消息
+		// follower 不会收到该消息
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgRequestVote:
-		// fellower 收到请求投票消息时，进行投票
+		// follower 收到请求投票消息时，进行投票
 		r.sendVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
-		// fellower 收到投票响应无效
+		// follower 收到投票响应无效
 	case pb.MessageType_MsgSnapshot:
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
+		// follower 收到心跳回应，说明是从 Leader 退化的，无需处理
 	}
 }
 
@@ -478,15 +479,15 @@ func (r *Raft) sendAppend(to uint64) {
 	// 获取已经匹配到的日志的 Term
 	prev_term, err := r.RaftLog.Term(prev_idx)
 	if err != nil {
-		return 
+		return
 	}
 
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
 	firstIndex := r.RaftLog.FirstIndex()
 	// TODO
-	if firstIndex - 1 > prev_idx && prev_idx != 0{
-		return 
+	if firstIndex-1 > prev_idx && prev_idx != 0 {
+		return
 	}
 
 	var ents []*pb.Entry
@@ -575,29 +576,29 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		return
 	}
 
-	fellower_match_idx := m.GetIndex()
-	fellower_id := from
-	r.Prs[fellower_id].Next = fellower_match_idx + 1
-	r.Prs[fellower_id].Match = r.Prs[fellower_id].Next - 1
+	follower_match_idx := m.GetIndex()
+	follower_id := from
+	r.Prs[follower_id].Next = follower_match_idx + 1
+	r.Prs[follower_id].Match = r.Prs[follower_id].Next - 1
 	// 统计 commit 日志消息，遍历 r.prs，找到最小的match，然后更新
 	// 是否存在一下情况？idx = 3 的提交已经占了大多数，但是 id = 2 的提交还没有占大多数？（应该不存在）TODO.可能这里有 bug
 	// 每次收到消息都检查一下当前这个消息是不是通过大多数投票，如果通过则 leader 提交？
-	if fellower_match_idx <= r.RaftLog.committed {
+	if follower_match_idx <= r.RaftLog.committed {
 		// 如果当前这个 id < r.Raftlog.committed，则代表该日志早就通过大多数投票被 leader 提交
 		return
 	}
 
 	vote_num := 0
 	for k := range r.Prs {
-		if r.Prs[k].Match >= fellower_match_idx {
+		if r.Prs[k].Match >= follower_match_idx {
 			vote_num++
 		}
 	}
 	// 更新 Leader 的 commited
 	// 只有领导者当前任期的日志条目才会通过计算副本数提交，这个日志才会被通过计算副本数的方式提交
-	log_term, _ := r.RaftLog.Term(fellower_match_idx)
+	log_term, _ := r.RaftLog.Term(follower_match_idx)
 	if vote_num > (len(r.Prs)/2) && log_term == r.Term {
-		r.RaftLog.committed = max(fellower_match_idx, r.RaftLog.committed)
+		r.RaftLog.committed = max(follower_match_idx, r.RaftLog.committed)
 		// 如果有更新，则更新后再给所有节点发送一个append 请求，用于更新 follower 节点的 commited
 		r.sendAppendMessage()
 	}
@@ -711,7 +712,7 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 	return flag, idx
 }
 
-// 当 fellower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
+// 当 follower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// 拒绝 term 小的请求
@@ -815,7 +816,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		return
 	}
 	m_from := m.GetFrom()
-	// 退化为 fellower，并重置选举时间
+	// 退化为 follower，并重置选举时间
 	r.electionElapsed = 0
 	r.becomeFollower(m_term, m_from)
 	// 处理心跳，append 日志
@@ -855,12 +856,12 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // 	r.msgs = append(r.msgs, msg)
 // }
 
-func (r *Raft) handleHeartbeatResponse(m pb.Message){
+func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 	// 前置，更新 term 和 State
 	if r.Term < m.Term {
 		r.Term = m.Term
 		if r.State != StateFollower {
-			r.becomeFollower(r.Term,None)
+			r.becomeFollower(r.Term, None)
 		}
 	}
 	r.heartbeatResp[m.From] = true

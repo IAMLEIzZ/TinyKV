@@ -102,7 +102,8 @@ func (d *peerMsgHandler) HandleRaftReady() {
 						continue
 					}
 					if p.index > ce.Index {
-						// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
+						// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，
+						// 因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
 						break
 					}
 					if p.index == ce.Index {

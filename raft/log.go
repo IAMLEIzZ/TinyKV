@@ -178,7 +178,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		return 0, nil
 	}
 	offset := l.entries[0].Index
-	if i < offset {
+	if i < offset || i - offset >= uint64(len(l.entries)){
 		return 0, nil
 	}
 	// 这里传进来的日志的 idx，而非下标
