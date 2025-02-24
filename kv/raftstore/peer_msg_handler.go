@@ -321,6 +321,109 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+// 提议普通请求
+func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	for _, m := range msg.Requests {
+		var key []byte
+		switch m.CmdType {
+		case raft_cmdpb.CmdType_Get:
+			key = m.Get.Key
+		case raft_cmdpb.CmdType_Delete:
+			key = m.Delete.Key
+		case raft_cmdpb.CmdType_Put:
+			key = m.Put.Key
+		}
+
+		if len(key) != 0 {
+			err := util.CheckKeyInRegion(key, d.peerStorage.region)
+			if err != nil {
+				cb.Done(ErrResp(err))
+				continue
+			}
+		}
+
+		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+		d.proposals = append(d.proposals, p)
+		data, err := msg.Marshal()
+		if err != nil {
+			log.Panic(err)
+		}
+		d.RaftGroup.Propose(data)
+	}
+}
+
+// ChangePeer 提议
+func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic(ErrResp(err))
+	}
+	peerId := msg.AdminRequest.ChangePeer.Peer.Id
+	cfchange := eraftpb.ConfChange{
+		ChangeType: msg.AdminRequest.ChangePeer.GetChangeType(),
+		NodeId:     peerId,
+		Context:    data,
+	}
+	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	d.proposals = append(d.proposals, p)
+	// 发送消息
+	err = d.RaftGroup.ProposeConfChange(cfchange)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+}
+
+// compactlog 提议
+func (d *peerMsgHandler) proposeCompactLog(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// CompactLog 作为普通的 entry
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic(ErrResp(err))
+	}
+
+	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	d.proposals = append(d.proposals, p)
+	d.RaftGroup.Propose(data)
+}
+
+// TransferLeader 提议
+func (d *peerMsgHandler) proposeTransferLeader(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// rawnode.transferleader
+	from_id := msg.AdminRequest.TransferLeader.Peer.Id
+
+	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	d.proposals = append(d.proposals, p)
+	d.RaftGroup.TransferLeader(from_id)
+}
+
+// Split 提议
+func (d *peerMsgHandler) proposeSplit(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// split 作为普通的 entry
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic(ErrResp(err))
+	}
+
+	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	d.proposals = append(d.proposals, p)
+	d.RaftGroup.Propose(data)
+}
+// 提议管理员请求
+func (d *peerMsgHandler) proposeAdminCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	adm_msg := msg.AdminRequest
+	switch adm_msg.CmdType {
+	case raft_cmdpb.AdminCmdType_ChangePeer:
+		d.proposeChangePeer(msg, cb)
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		d.proposeCompactLog(msg, cb)
+	case raft_cmdpb.AdminCmdType_TransferLeader:
+		d.proposeTransferLeader(msg, cb)
+	case raft_cmdpb.AdminCmdType_Split:
+		d.proposeSplit(msg, cb)
+	}
+}
+
 // 将消息提议到对应的 Raft 模块
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	err := d.preProposeRaftCommand(msg)
@@ -330,100 +433,14 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	}
 	// Your Code Here (2B).
 	// 获取消息请求头
-	adm_msg := msg.AdminRequest
-	// msgs 不为空
-	for _, m := range msg.Requests {
-		// 将消息提议到 raft
-		// 获取对应的 key
-		var key []byte
-		switch m.CmdType {
-		case raft_cmdpb.CmdType_Get:
-			key = m.Get.GetKey()
-		case raft_cmdpb.CmdType_Delete:
-			key = m.Delete.GetKey()
-		case raft_cmdpb.CmdType_Put:
-			// fmt.Printf("msg step put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
-			key = m.Put.GetKey()
-		}
-		// check key 是否在当前 region 区间
-		if len(key) != 0 {
-			err := util.CheckKeyInRegion(key, d.peerStorage.region)
-			if err != nil {
-				cb.Done(ErrResp(err))
-				continue
-			}
-		}
-		// 获取 term 和 idx
-		p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-		// 加入 proposals 队列
-		d.proposals = append(d.proposals, p)
-		// 消息编码化
-		data, err := msg.Marshal()
-		if err != nil {
-			log.Panic(err)
-		}
-		// 发送消息
-		d.RaftGroup.Propose(data)
+	if msg.AdminRequest != nil {
+		// 处理 admin 消息
+		d.proposeAdminCommand(msg, cb)
+		return 
 	}
 
-	// 处理 admin 消息
-	if adm_msg != nil {
-		switch adm_msg.CmdType {
-		case raft_cmdpb.AdminCmdType_ChangePeer:
-			// changePeer 消息
-			data, err := msg.Marshal()
-			if err != nil {
-				log.Panic(ErrResp(err))
-			}
-			peerId := msg.AdminRequest.ChangePeer.Peer.Id
-			// 如果是一个 changePeer 请求，代表 confchange，创建 ConfChange 结构体
-			cfchange := eraftpb.ConfChange{
-				ChangeType: msg.AdminRequest.ChangePeer.GetChangeType(),
-				NodeId:     peerId,
-				Context:    data,
-			}
-
-			p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-			d.proposals = append(d.proposals, p)
-
-			// 发送消息
-			err = d.RaftGroup.ProposeConfChange(cfchange)
-			if err != nil {
-				cb.Done(ErrResp(err))
-				return
-			}
-
-		case raft_cmdpb.AdminCmdType_CompactLog:
-			// CompactLog 作为普通的 entry
-			data, err := msg.Marshal()
-			if err != nil {
-				log.Panic(ErrResp(err))
-			}
-
-			p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-			d.proposals = append(d.proposals, p)
-			d.RaftGroup.Propose(data)
-		case raft_cmdpb.AdminCmdType_TransferLeader:
-			// rawnode.transferleader
-			from_id := msg.AdminRequest.TransferLeader.Peer.Id
-
-			p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-			d.proposals = append(d.proposals, p)
-
-			d.RaftGroup.TransferLeader(from_id)
-		case raft_cmdpb.AdminCmdType_Split:
-			// split 作为普通的 entry
-			data, err := msg.Marshal()
-			if err != nil {
-				log.Panic(ErrResp(err))
-			}
-
-			p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-			d.proposals = append(d.proposals, p)
-
-			d.RaftGroup.Propose(data)
-		}
-	}
+	// 普通请求
+	d.proposeNormalCommand(msg, cb)
 }
 
 func (d *peerMsgHandler) onTick() {
