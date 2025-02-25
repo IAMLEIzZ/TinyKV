@@ -25,6 +25,7 @@ func NewRaftLogGCTaskHandler() *raftLogGCTaskHandler {
 	return &raftLogGCTaskHandler{}
 }
 
+// 从数据库中删除已经不再需要的 Raft 日志条目来释放存储空间
 // gcRaftLog does the GC job and returns the count of logs collected.
 func (r *raftLogGCTaskHandler) gcRaftLog(raftDb *badger.DB, regionId, startIdx, endIdx uint64) (uint64, error) {
 	// Find the raft log idx range needed to be gc.
@@ -52,7 +53,8 @@ func (r *raftLogGCTaskHandler) gcRaftLog(raftDb *badger.DB, regionId, startIdx, 
 		log.Infof("no need to gc, [regionId: %d]", regionId)
 		return 0, nil
 	}
-
+	
+	// 清除 raftWb 中的需要压缩的 entry
 	raftWb := engine_util.WriteBatch{}
 	for idx := firstIdx; idx < endIdx; idx += 1 {
 		key := meta.RaftLogKey(regionId, idx)
@@ -73,6 +75,7 @@ func (r *raftLogGCTaskHandler) reportCollected(collected uint64) {
 	r.taskResCh <- raftLogGcTaskRes(collected)
 }
 
+// 实现上层 ticker 的 handle 接口
 func (r *raftLogGCTaskHandler) Handle(t worker.Task) {
 	logGcTask, ok := t.(*RaftLogGCTask)
 	if !ok {

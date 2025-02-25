@@ -188,6 +188,10 @@ func newRaft(c *Config) *Raft {
 
 	vote_map := make(map[uint64]bool)
 	prs_map := make(map[uint64]*Progress)
+	for _, id := range c.peers {
+		vote_map[id] = false
+		prs_map[id] = &Progress{Match: 0, Next: 1}
+	}
 	raft := &Raft{
 		id:               c.ID,
 		RaftLog:          newLog(c.Storage),
@@ -202,11 +206,6 @@ func newRaft(c *Config) *Raft {
 		Term:          hardstate.Term,
 		et:            c.ElectionTick,
 		heartbeatResp: make(map[uint64]bool),
-	}
-
-	for _, id := range c.peers {
-		vote_map[id] = false
-		prs_map[id] = &Progress{Match: 0, Next: 1}
 	}
 
 	if c.Applied > 0 {
@@ -393,6 +392,7 @@ func (r *Raft) stepFollower(m pb.Message) {
 	case pb.MessageType_MsgRequestVoteResponse:
 		// follower 收到投票响应无效
 	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
@@ -431,6 +431,7 @@ func (r *Raft) stepCandidate(m pb.Message) {
 			r.becomeLeader()
 		}
 	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
@@ -477,16 +478,30 @@ func (r *Raft) sendAppend(to uint64) {
 	// 对应成员的目前日志复制进度，next 是成员希望收到的，-1 代表已经匹配到的 idx
 	prev_idx := r.Prs[to].Next - 1
 	// 获取已经匹配到的日志的 Term
-	prev_term, err := r.RaftLog.Term(prev_idx)
-	if err != nil {
-		return
-	}
-
+	prev_term, _ := r.RaftLog.Term(prev_idx)
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
 	firstIndex := r.RaftLog.FirstIndex()
-	// TODO
-	if firstIndex-1 > prev_idx && prev_idx != 0 {
+	// 这里如果 firstIndex - 1 > prev_idx 的情况，则代表要发送 snapshot
+	if firstIndex - 1 > prev_idx && prev_idx != 0{
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgSnapshot,
+			From: r.id,
+			To: to,
+			Term: r.Term,
+		}
+		if r.RaftLog.pendingSnapshot != nil {
+			msg.Snapshot = r.RaftLog.pendingSnapshot
+		} else {
+			snap, err := r.RaftLog.storage.Snapshot()
+			if err != nil {
+				return
+			}
+			msg.Snapshot = &snap
+			r.Prs[to].Next = snap.Metadata.Index + 1
+			r.Prs[to].Match = snap.Metadata.Index
+		}
+		r.msgs = append(r.msgs, msg)
 		return
 	}
 
@@ -841,7 +856,7 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 		ents = append(ents, &r.RaftLog.entries[idx])
 	}
 	lt, _ := r.RaftLog.Term(li)
-
+	r.heartbeatResp[m.From] = true
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		From:    r.id,
@@ -871,9 +886,57 @@ func (r *Raft) handleHeartbeatResponse(m pb.Message) {
 // 	}
 // }
 
+// 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	rej := false
+	if r.Term > m.Term {
+		// 非法请求
+		rej = true
+	}
+	// 这里根据 snap 来修改 raft 的状态
+	// 根据 snap 的 node 信息，处理 peer
+	meta := m.Snapshot.Metadata
+	if meta.Index <= r.RaftLog.committed {
+		// 代表此时的 snapshot 已过时
+		msg := pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			From: r.id,
+			To: m.From,
+			Reject: rej,
+			Index: r.RaftLog.committed,
+		}
+		r.msgs = append(r.msgs, msg)
+		return 
+	}
+	// 当 foolower 收到 snap 时，他的状态一定远远落后于 Leader，因此要直接按照 snapshot 更新状态
+	r.RaftLog.applied = meta.Index
+	r.RaftLog.committed = meta.Index
+	r.RaftLog.stabled = meta.Index
+	// 删除 raftlog 中当前的 entry
+	r.RaftLog.entries = nil
+	// 将 snapshot 放入待安装的 snapshot 中，等待上层的 advance 处理
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.Term = meta.Term
+	r.becomeFollower(meta.Term, m.From)
+	if len(meta.ConfState.Nodes) != 0 {
+		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
+		r.Prs = make(map[uint64]*Progress)
+		for _, id := range meta.ConfState.Nodes {
+			r.Prs[id] = &Progress{}
+			r.votes[id] = false
+		}
+	}
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		From: r.id,
+		To: m.From,
+		Reject: rej,
+		Index: meta.Index,
+	}
+
+	r.msgs = append(r.msgs, msg)
 }
 
 // addNode add a new node to raft group

@@ -23,9 +23,9 @@ import (
 )
 
 // 这个模块是 Raft 模块追加日志进行持久化的模块，主要负责持久化 Raft 日志
-
 type ApplySnapResult struct {
 	// PrevRegion is the region before snapshot applied
+	// 应用快照前的 Region 信息
 	PrevRegion *metapb.Region
 	Region     *metapb.Region
 }
@@ -163,6 +163,7 @@ func (ps *PeerStorage) FirstIndex() (uint64, error) {
 // 获取当前快照
 func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 	var snapshot eraftpb.Snapshot
+	// 如果当前 ps 的状态是快照生成中，则尝试接收快照
 	if ps.snapState.StateType == snap.SnapState_Generating {
 		select {
 		case s := <-ps.snapState.Receiver:
@@ -172,7 +173,9 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		default:
 			return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 		}
+		// 接受成功改变状态
 		ps.snapState.StateType = snap.SnapState_Relax
+		// 快照有效性验证
 		if snapshot.GetMetadata() != nil {
 			ps.snapTriedCnt = 0
 			if ps.validateSnap(&snapshot) {
@@ -183,12 +186,14 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		}
 	}
 
+	// 如果尝试获取快照的次数超过 5 次，返回错误，并重置 snapTriedCnt 计数器
 	if ps.snapTriedCnt >= 5 {
 		err := errors.Errorf("failed to get snapshot after %d times", ps.snapTriedCnt)
 		ps.snapTriedCnt = 0
 		return snapshot, err
 	}
 
+	// 生成 snapshot 
 	log.Infof("%s requesting snapshot", ps.Tag)
 	ps.snapTriedCnt++
 	ch := make(chan *eraftpb.Snapshot, 1)
@@ -196,11 +201,13 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		StateType: snap.SnapState_Generating,
 		Receiver:  ch,
 	}
+	
 	// schedule snapshot generate task
 	ps.regionSched <- &runner.RegionTaskGen{
 		RegionId: ps.region.GetId(),
 		Notifier: ch,
 	}
+	// 返回一个表示快照暂时不可用的错误，告知调用方稍后重试
 	return snapshot, raft.ErrSnapshotTemporarilyUnavailable
 }
 
@@ -357,20 +364,57 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	return err
 }
 
-// 应用快照
+// 应用快照（follower 和 candidate）
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
+	println("iamleizz++")
 	snapData := new(rspb.RaftSnapshotData)
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
 	}
-
 	// Hint: things need to do here including: update peer storage state like raftState and applyState, etc,
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+	// 验证快照是否合法
+	// 清除之前的数据
+	if ps.isInitialized() {
+		ps.clearMeta(kvWB, raftWB)
+		ps.clearExtraData(snapData.Region)
+	}
+	preRegion := ps.Region()
+	// 应用快照 
+	// 更新 rateState 和 applyState
+	ps.raftState.LastIndex = snapshot.Metadata.Index
+	ps.raftState.LastTerm = snapshot.Metadata.Term
+	ps.applyState.AppliedIndex = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.Index
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
+	ps.snapState.StateType = snap.SnapState_Applying
+	// 将 applystate 写入 kvwb 中，Raftstate 会在 saveReadyState 中 raftWB 中
+	kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+	// 任务完成通知通道
+	finished := make(chan bool, 1)
+	// 将 k-v 数据写入 kvdb 和 raftdb (install snapshot)，使用已经写好的 applytask 即可
+	ps.regionSched <- &runner.RegionTaskApply{
+		RegionId: snapData.Region.Id,
+		Notifier: finished,
+		SnapMeta: snapshot.Metadata,
+		StartKey: snapData.Region.StartKey,
+		EndKey: snapData.Region.EndKey,
+	}
+
+	<-finished
+
+	new_region := ps.Region()
+	applyres := &ApplySnapResult{
+		PrevRegion: preRegion,
+		Region: new_region,
+	}
+	// 将 kvwb 中的修改数据写入 DB 中
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	return applyres, nil
 }
 
 // 将内存中的状态保存到磁盘。
@@ -397,8 +441,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	kvWB := new(engine_util.WriteBatch)
 	// 分别组装 key val 然后提交
 	var err error
-	if raft.IsEmptySnap(&ready.Snapshot) {
-		
+	if !raft.IsEmptySnap(&ready.Snapshot) {
 		// 将新快照引用到 storage 中
 		applySnap, err = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
 		if err != nil {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/snap"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
@@ -58,7 +59,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		// 发送消息 （处理 message）
 		d.Send(d.ctx.trans, ready.Messages)
 		// 处理需要 apply 的消息 （处理 commitedEntry）
-		// 如果是 Get/Put/Delete 消息
 		for _, en := range ready.CommittedEntries {
 			kvWB := new(engine_util.WriteBatch)
 			req := new(raft_cmdpb.RaftCmdRequest)
@@ -73,75 +73,26 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				// admin 请求
 				switch adminReq.CmdType {
 				case raft_cmdpb.AdminCmdType_CompactLog:
-					// 压缩日志
+					// SaveReadyState 中已经应用了 snapshot，因此这里直接用修改好的 truncatedIndex 创建一个压缩日志任务
+					if adminReq.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+						d.peerStorage.applyState.TruncatedState.Index, d.peerStorage.applyState.TruncatedState.Term = adminReq.CompactLog.CompactIndex, adminReq.CompactLog.CompactTerm
+						kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
+						d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
+					}
+					adminResp := &raft_cmdpb.AdminResponse{
+						CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
+						CompactLog: &raft_cmdpb.CompactLogResponse{},
+					}
+					cmdResp := &raft_cmdpb.RaftCmdResponse{
+						Header:        &raft_cmdpb.RaftResponseHeader{},
+						AdminResponse: adminResp,
+					}
+					d.processProposal(cmdResp, &en, false)
 				case raft_cmdpb.AdminCmdType_Split:
 					// region 分裂
 				}
 			}
-
-			// 这里判断是普通请求还是一个 admin 请求 (普通请求和 admin 请求无法同时出现，因此轮询即可)
-			// for _, m := range msg.Requests {
-			// 	header := &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()}
-			// 	response := &raft_cmdpb.Response{}
-			// 	switch m.CmdType {
-			// 	case raft_cmdpb.CmdType_Get:
-			// 	case raft_cmdpb.CmdType_Put:
-			// 		// fmt.Printf("put key:%s + val:%s\n", m.Put.Key, m.Put.Value)
-			// 		kvWB.SetCF(m.Put.Cf, m.Put.Key, m.Put.Value)
-			// 	case raft_cmdpb.CmdType_Delete:
-			// 		kvWB.DeleteCF(m.Delete.Cf, m.Delete.Key)
-			// 	case raft_cmdpb.CmdType_Snap:
-			// 	}
-			// 	// 处理完一条消息后，从 proposal 中完成一条消息
-			// 	for len(d.proposals) > 0 {
-			// 		// 取出第一条消息
-			// 		p := d.proposals[0]
-			// 		if p.index < en.Index {
-			// 			// 代表这个 proposal 已经过期
-			// 			d.proposals = d.proposals[1:]
-			// 			p.cb.Done(ErrResp(&util.ErrStaleCommand{}))
-			// 			continue
-			// 		}
-			// 		if p.index > en.Index {
-			// 			// 这里的判断不能少，会死循环 QAQ，卡了好久，这里的死循环会导致go routine无法正常退出从而导致 peer 无法 shutdown，
-			// 			// 因为 peer shutdown的时候会进行阻塞，等待所有 goroutine 完成
-			// 			break
-			// 		}
-			// 		if p.index == en.Index {
-			// 			// index 匹配
-			// 			if p.term != en.Term {
-			// 				// term 不匹配，代表已经被覆盖
-			// 				NotifyStaleReq(en.Term, p.cb)
-			// 				d.proposals = d.proposals[1:]
-			// 			} else {
-			// 				switch m.CmdType {
-			// 				case raft_cmdpb.CmdType_Get:
-			// 					val, _ := engine_util.GetCF(d.ctx.engine.Kv, m.Get.Cf, m.Get.Key)
-			// 					response.Get = &raft_cmdpb.GetResponse{Value: val}
-			// 					response.CmdType = raft_cmdpb.CmdType_Get
-			// 				case raft_cmdpb.CmdType_Put:
-			// 					response.Put = &raft_cmdpb.PutResponse{}
-			// 					response.CmdType = raft_cmdpb.CmdType_Put
-			// 				case raft_cmdpb.CmdType_Delete:
-			// 					response.Delete = &raft_cmdpb.DeleteResponse{}
-			// 					response.CmdType = raft_cmdpb.CmdType_Delete
-			// 				case raft_cmdpb.CmdType_Snap:
-			// 					response.Snap = &raft_cmdpb.SnapResponse{Region: d.Region()}
-			// 					p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-			// 					response.CmdType = raft_cmdpb.CmdType_Snap
-			// 				}
-			// 				resq := &raft_cmdpb.RaftCmdResponse{
-			// 					Header:    header,
-			// 					Responses: make([]*raft_cmdpb.Response, 0),
-			// 				}
-			// 				resq.Responses = append(resq.Responses, response)
-			// 				p.cb.Done(resq)
-			// 				d.proposals = d.proposals[1:]
-			// 			}
-			// 			break
-			// 		}
-			// 	}
-			// }
+			// 处理普通请求
 			d.processNormalRequest(req, &en, kvWB)
 			// 向 kv 数据库中写入
 			kvWB.MustWriteToDB(d.ctx.engine.Kv)
@@ -331,6 +282,7 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 		case raft_cmdpb.CmdType_Delete:
 			key = m.Delete.Key
 		case raft_cmdpb.CmdType_Put:
+			// println("propose put" + string(m.Put.Key) + "_" + string(m.Put.Value))
 			key = m.Put.Key
 		}
 
@@ -354,24 +306,24 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 
 // ChangePeer 提议
 func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
-	data, err := msg.Marshal()
-	if err != nil {
-		log.Panic(ErrResp(err))
-	}
-	peerId := msg.AdminRequest.ChangePeer.Peer.Id
-	cfchange := eraftpb.ConfChange{
-		ChangeType: msg.AdminRequest.ChangePeer.GetChangeType(),
-		NodeId:     peerId,
-		Context:    data,
-	}
-	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-	d.proposals = append(d.proposals, p)
-	// 发送消息
-	err = d.RaftGroup.ProposeConfChange(cfchange)
-	if err != nil {
-		cb.Done(ErrResp(err))
-		return
-	}
+	// data, err := msg.Marshal()
+	// if err != nil {
+	// 	log.Panic(ErrResp(err))
+	// }
+	// peerId := msg.AdminRequest.ChangePeer.Peer.Id
+	// cfchange := eraftpb.ConfChange{
+	// 	ChangeType: msg.AdminRequest.ChangePeer.GetChangeType(),
+	// 	NodeId:     peerId,
+	// 	Context:    data,
+	// }
+	// p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	// d.proposals = append(d.proposals, p)
+	// // 发送消息
+	// err = d.RaftGroup.ProposeConfChange(cfchange)
+	// if err != nil {
+	// 	cb.Done(ErrResp(err))
+	// 	return
+	// }
 }
 
 // compactlog 提议
@@ -381,7 +333,6 @@ func (d *peerMsgHandler) proposeCompactLog(msg *raft_cmdpb.RaftCmdRequest, cb *m
 	if err != nil {
 		log.Panic(ErrResp(err))
 	}
-
 	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
 	d.proposals = append(d.proposals, p)
 	d.RaftGroup.Propose(data)
@@ -390,25 +341,26 @@ func (d *peerMsgHandler) proposeCompactLog(msg *raft_cmdpb.RaftCmdRequest, cb *m
 // TransferLeader 提议
 func (d *peerMsgHandler) proposeTransferLeader(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// rawnode.transferleader
-	from_id := msg.AdminRequest.TransferLeader.Peer.Id
+	// from_id := msg.AdminRequest.TransferLeader.Peer.Id
 
-	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-	d.proposals = append(d.proposals, p)
-	d.RaftGroup.TransferLeader(from_id)
+	// p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	// d.proposals = append(d.proposals, p)
+	// d.RaftGroup.TransferLeader(from_id)
 }
 
 // Split 提议
 func (d *peerMsgHandler) proposeSplit(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	// split 作为普通的 entry
-	data, err := msg.Marshal()
-	if err != nil {
-		log.Panic(ErrResp(err))
-	}
+	// data, err := msg.Marshal()
+	// if err != nil {
+	// 	log.Panic(ErrResp(err))
+	// }
 
-	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-	d.proposals = append(d.proposals, p)
-	d.RaftGroup.Propose(data)
+	// p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	// d.proposals = append(d.proposals, p)
+	// d.RaftGroup.Propose(data)
 }
+
 // 提议管理员请求
 func (d *peerMsgHandler) proposeAdminCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
 	adm_msg := msg.AdminRequest
@@ -477,6 +429,8 @@ func (d *peerMsgHandler) onRaftBaseTick() {
 	d.ticker.schedule(PeerTickRaft)
 }
 
+// 创建并发送一个日志压缩任务
+// 上层的 worker 监控chan，当收到任务后，进行压缩处理
 func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
 	raftLogGCTask := &runner.RaftLogGCTask{
 		RaftEngine: d.ctx.engine.Raft,
@@ -499,12 +453,14 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 	}
 	if msg.GetIsTombstone() {
 		// we receive a message tells us to remove self.
+		// 调用 PeerGC 来删除一个 peer
 		d.handleGCPeerMsg(msg)
 		return nil
 	}
 	if d.checkMessage(msg) {
 		return nil
 	}
+	// 如果是 snap 消息，则key != nil
 	key, err := d.checkSnapshot(msg)
 	if err != nil {
 		return err
@@ -514,10 +470,12 @@ func (d *peerMsgHandler) onRaftMsg(msg *rspb.RaftMessage) error {
 		// delete them here. If the snapshot file will be reused when
 		// receiving, then it will fail to pass the check again, so
 		// missing snapshot files should not be noticed.
+		// 调用 GetSnapshotForApplying 获取要应用的快照，若无法获取，则返回错误。
 		s, err1 := d.ctx.snapMgr.GetSnapshotForApplying(*key)
 		if err1 != nil {
 			return err1
 		}
+		// apply 后调用 DeleteSnapshot 删除它。
 		d.ctx.snapMgr.DeleteSnapshot(*key, s, false)
 		return nil
 	}
@@ -758,6 +716,7 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 		panic(err)
 	}
 
+	// 满足压缩条件时，创建压缩请求
 	// Create a compact log request and notify directly.
 	regionID := d.regionId
 	request := newCompactLogRequest(regionID, d.Meta, compactIdx, term)

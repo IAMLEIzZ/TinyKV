@@ -30,6 +30,7 @@ func (w *Worker) Start(handler TaskHandler) {
 			s.Start()
 		}
 		for {
+			// 接收到任务时，启动实现 handle 接口的方法
 			Task := <-w.receiver
 			if _, ok := Task.(TaskStop); ok {
 				return

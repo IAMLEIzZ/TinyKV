@@ -221,7 +221,7 @@ func (rn *RawNode) newReady() Ready {
 		rd.HardState = hardstate
 		rn.pre_hardstate = hardstate
 	}
-	if rn.Raft.RaftLog.pendingSnapshot != nil{
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot){
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
 	return rd
@@ -244,7 +244,7 @@ func (rn *RawNode) HasReady() bool {
 		}
 	}
 
-	if rn.Raft.RaftLog.pendingSnapshot != nil {
+	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot){
 		return true
 	}
 
@@ -272,9 +272,8 @@ func (rn *RawNode) Advance(rd Ready) {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries) - 1].Index
 	}
 	rn.Raft.msgs = msg
-	
+	rn.Raft.RaftLog.maybeCompact()
 	rn.Raft.RaftLog.pendingSnapshot = nil
-
 }
 
 // GetProgress 返回此节点及其对等节点的进度，如果此节点是领导者。

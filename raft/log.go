@@ -91,6 +91,14 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	remainedIndex, _ := l.storage.FirstIndex() // 在此之前的均被压缩
+	if len(l.entries) > 0 {
+		if remainedIndex > l.LastIndex() {
+			l.entries = nil
+		} else if remainedIndex >= l.FirstIndex() {
+			l.entries = l.entries[remainedIndex-l.FirstIndex():]
+		}
+	}
 }
 
 // allEntries 返回所有未压缩的条目。
@@ -164,8 +172,8 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
 	if len(l.entries) == 0 {
-		index, _ := l.storage.LastIndex()
-		return index
+		// 当条目为空时，则直接用 stable 代替最后一个条目，因为这之前的条目都已经写入内存，下一个条目是从 stable 开始的
+		return l.stabled
 	}
 	return l.entries[len(l.entries)-1].Index
 }
@@ -174,14 +182,47 @@ func (l *RaftLog) LastIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	// 此时应该检查 storage
+	var term uint64
+	var err error
 	if len(l.entries) == 0 {
-		return 0, nil
+		term, err = l.storage.Term(i)
+		if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot){
+			// 代表此时这个条目在 snapshot 中，但快照还没有应用到状态机
+			if i == l.pendingSnapshot.Metadata.Index {
+				// i 等于 snapshot 的截断 idx，则直接返回截断 term
+				term = l.pendingSnapshot.Metadata.Index
+				err = nil
+			} else if i < l.pendingSnapshot.Metadata.Index {
+				// 该条目已经被压缩，无法获得对应的 term
+				term = 0
+				err = ErrCompacted
+			}
+		}
+	} else {
+		offset := l.entries[0].Index
+		if i < offset || i - offset >= uint64(len(l.entries)){
+			term = 0
+			err = nil
+		} else {
+			term = l.entries[i-offset].Term
+		}
 	}
-	offset := l.entries[0].Index
-	if i < offset || i - offset >= uint64(len(l.entries)){
-		return 0, nil
-	}
-	// 这里传进来的日志的 idx，而非下标
-	term := l.entries[i-offset].Term
-	return term, nil
+	return term, err
 }
+
+// func (l *RaftLog) Term(i uint64) (uint64, error) {
+// 	// Your Code Here (2A).
+// 	if len(l.entries) == 0 {
+// 		if !IsEmptySnap(l.pendingSnapshot) && i == l.pendingSnapshot.Metadata.Index {
+// 			return l.pendingSnapshot.Metadata.Term, nil
+// 		}
+// 	}
+// 	offset := l.entries[0].Index
+// 	if i < offset || i - offset >= uint64(len(l.entries)){
+// 		return 0, nil
+// 	}
+// 	// 这里传进来的日志的 idx，而非下标
+// 	term := l.entries[i-offset].Term
+// 	return term, nil
+// }
