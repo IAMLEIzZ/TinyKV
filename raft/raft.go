@@ -188,10 +188,7 @@ func newRaft(c *Config) *Raft {
 
 	vote_map := make(map[uint64]bool)
 	prs_map := make(map[uint64]*Progress)
-	for _, id := range c.peers {
-		vote_map[id] = false
-		prs_map[id] = &Progress{Match: 0, Next: 1}
-	}
+
 	raft := &Raft{
 		id:               c.ID,
 		RaftLog:          newLog(c.Storage),
@@ -206,6 +203,11 @@ func newRaft(c *Config) *Raft {
 		Term:          hardstate.Term,
 		et:            c.ElectionTick,
 		heartbeatResp: make(map[uint64]bool),
+	}
+
+	for _, id := range c.peers {
+		vote_map[id] = false
+		prs_map[id] = &Progress{Match: 0, Next: 1}
 	}
 
 	if c.Applied > 0 {
@@ -465,8 +467,33 @@ func (r *Raft) stepLeader(m pb.Message) {
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
-		r.handleHeartbeatResponse(m)
+		r.sendAppend(m.From)
 	}
+}
+
+func (r *Raft) sendSnapshot(to uint64) {
+	if _, ok := r.Prs[to]; !ok {
+		return
+	}
+	var snapshot pb.Snapshot
+	var err error = nil
+	if IsEmptySnap(r.RaftLog.pendingSnapshot) {
+		snapshot, err = r.RaftLog.storage.Snapshot()
+	} else {
+		snapshot = *r.RaftLog.pendingSnapshot
+	}
+	if err != nil {
+		return
+	}
+	msg := pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		From:     r.id,
+		To:       to,
+		Term:     r.Term,
+		Snapshot: &snapshot,
+	}
+	r.msgs = append(r.msgs, msg)
+	r.Prs[to].Next = snapshot.Metadata.Index + 1
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -482,26 +509,10 @@ func (r *Raft) sendAppend(to uint64) {
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
 	firstIndex := r.RaftLog.FirstIndex()
-	// 这里如果 firstIndex - 1 > prev_idx 的情况，则代表要发送 snapshot
-	if firstIndex - 1 > prev_idx && prev_idx != 0{
-		msg := pb.Message{
-			MsgType: pb.MessageType_MsgSnapshot,
-			From: r.id,
-			To: to,
-			Term: r.Term,
-		}
-		if r.RaftLog.pendingSnapshot != nil {
-			msg.Snapshot = r.RaftLog.pendingSnapshot
-		} else {
-			snap, err := r.RaftLog.storage.Snapshot()
-			if err != nil {
-				return
-			}
-			msg.Snapshot = &snap
-			r.Prs[to].Next = snap.Metadata.Index + 1
-			r.Prs[to].Match = snap.Metadata.Index
-		}
-		r.msgs = append(r.msgs, msg)
+	// 这里如果 firstIndex - 1 > prev_idx 的情况，则代表要发送 snapshot (if firstIndex - 1 > prev_idx && prev_idx != 0)
+	if firstIndex - 1 > prev_idx{
+		// println("send snapShot to", to)
+		r.sendSnapshot(to)
 		return
 	}
 
@@ -579,15 +590,16 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.State == StateFollower || r.State == StateCandidate {
 		return
 	}
+	if m.Index > r.Prs[m.From].Match && m.GetReject(){
+		r.Prs[m.From].Match = m.Index
+		r.Prs[m.From].Next = m.Index + 1
+		return 
+	}
 	// 如果拒绝，则会缩小对应的 prs
 	from := m.GetFrom()
 	if m.GetReject() {
-		if r.Prs[from].Match > 0 {
-			r.Prs[from].Match--
-		}
-		if r.Prs[from].Next > 1 {
-			r.Prs[from].Next--
-		}
+		r.Prs[m.From].Next = min(m.Index + 1, r.Prs[m.From].Next - 1)
+		r.sendAppend(m.From)
 		return
 	}
 
@@ -715,6 +727,15 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 		return flag, idx
 	}
 
+	// 已经匹配
+	if len(r.RaftLog.entries) == 0 {
+		t, err := r.RaftLog.Term(prev_index)
+		if r.Prs[r.id].Match == prev_index && (err == ErrCompacted || t == prev_term){
+			flag = false
+			return flag, idx
+		}
+	}
+
 	for i, ent := range r.RaftLog.entries {
 		//  匹配成功，继续执行
 		if ent.Index == prev_index && ent.Term == prev_term {
@@ -723,7 +744,7 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 			break
 		}
 	}
-
+	
 	return flag, idx
 }
 
@@ -747,6 +768,8 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			From:    r.id,
 			To:      m_from,
 			Term:    r.Term,
+			Index: r.RaftLog.LastIndex(),
+			Commit: r.RaftLog.committed,
 			Reject:  true,
 		}
 		r.msgs = append(r.msgs, msg)
@@ -845,45 +868,30 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 // 当 Leader 收到心跳回应时，根据 prs 向发送者发送剩余条目
-func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-	m_from := m.GetFrom()
-	next_idx := r.Prs[m_from].Next
-	// 发送 next 后的所有条目
-	ents := make([]*pb.Entry, 0)
-	li := r.RaftLog.LastIndex()
-	idx := next_idx - r.RaftLog.entries[0].Index
-	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
-		ents = append(ents, &r.RaftLog.entries[idx])
-	}
-	lt, _ := r.RaftLog.Term(li)
-	r.heartbeatResp[m.From] = true
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppend,
-		From:    r.id,
-		To:      m_from,
-		Term:    r.Term,
-		Index:   next_idx - 1,
-		LogTerm: lt,
-		Entries: ents,
-		Commit:  r.RaftLog.committed,
-	}
-
-	r.msgs = append(r.msgs, msg)
-}
-
 // func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-// 	// 前置，更新 term 和 State
-// 	if r.Term < m.Term {
-// 		r.Term = m.Term
-// 		if r.State != StateFollower {
-// 			r.becomeFollower(r.Term, None)
-// 		}
+// 	m_from := m.GetFrom()
+// 	next_idx := r.Prs[m_from].Next
+// 	// 发送 next 后的所有条目
+// 	ents := make([]*pb.Entry, 0)
+// 	li := r.RaftLog.LastIndex()
+// 	idx := next_idx - r.RaftLog.entries[0].Index
+// 	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
+// 		ents = append(ents, &r.RaftLog.entries[idx])
 // 	}
+// 	lt, _ := r.RaftLog.Term(li)
 // 	r.heartbeatResp[m.From] = true
-// 	// 如果节点落后了，append
-// 	if m.Commit < r.RaftLog.committed {
-// 		r.sendAppend(m.From)
+// 	msg := pb.Message{
+// 		MsgType: pb.MessageType_MsgAppend,
+// 		From:    r.id,
+// 		To:      m_from,
+// 		Term:    r.Term,
+// 		Index:   next_idx - 1,
+// 		LogTerm: lt,
+// 		Entries: ents,
+// 		Commit:  r.RaftLog.committed,
 // 	}
+
+// 	r.msgs = append(r.msgs, msg)
 // }
 
 // 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
@@ -898,7 +906,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	// 这里根据 snap 来修改 raft 的状态
 	// 根据 snap 的 node 信息，处理 peer
 	meta := m.Snapshot.Metadata
-	if meta.Index <= r.RaftLog.committed {
+	if meta.Index < r.RaftLog.committed {
 		// 代表此时的 snapshot 已过时
 		msg := pb.Message{
 			MsgType: pb.MessageType_MsgAppendResponse,
@@ -924,7 +932,11 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
 		r.Prs = make(map[uint64]*Progress)
 		for _, id := range meta.ConfState.Nodes {
-			r.Prs[id] = &Progress{}
+			if id == r.id {
+				r.Prs[id] = &Progress{Next: meta.Index + 1, Match: meta.Index}
+			} else {
+				r.Prs[id] = &Progress{}
+			}
 			r.votes[id] = false
 		}
 	}

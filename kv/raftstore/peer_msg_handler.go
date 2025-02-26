@@ -60,6 +60,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		d.Send(d.ctx.trans, ready.Messages)
 		// 处理需要 apply 的消息 （处理 commitedEntry）
 		for _, en := range ready.CommittedEntries {
+			d.peerStorage.applyState.AppliedIndex = en.Index
 			kvWB := new(engine_util.WriteBatch)
 			req := new(raft_cmdpb.RaftCmdRequest)
 			err := req.Unmarshal(en.Data)
@@ -77,7 +78,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 					if adminReq.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
 						d.peerStorage.applyState.TruncatedState.Index, d.peerStorage.applyState.TruncatedState.Term = adminReq.CompactLog.CompactIndex, adminReq.CompactLog.CompactTerm
 						kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
-						d.ScheduleCompactLog(d.peerStorage.truncatedIndex())
+						d.ScheduleCompactLog(adminReq.CompactLog.CompactIndex)
 					}
 					adminResp := &raft_cmdpb.AdminResponse{
 						CmdType:    raft_cmdpb.AdminCmdType_CompactLog,
@@ -95,7 +96,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			// 处理普通请求
 			d.processNormalRequest(req, &en, kvWB)
 			// 向 kv 数据库中写入
-			kvWB.MustWriteToDB(d.ctx.engine.Kv)
+			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
 		}
 		d.RaftGroup.Advance(ready)
 	}

@@ -100,7 +100,6 @@ func (l *RaftLog) maybeCompact() {
 		}
 	}
 }
-
 // allEntries 返回所有未压缩的条目。
 // 注意，排除任何虚拟条目。
 // 注意，这是你需要实现的测试存根函数之一。
@@ -180,32 +179,49 @@ func (l *RaftLog) LastIndex() uint64 {
 
 // Term 返回给定索引中条目的 term
 // Term return the term of the entry in the given index
+// func (l *RaftLog) Term(i uint64) (uint64, error) {
+// 	// Your Code Here (2A).
+// 	// 此时应该检查 storage
+// 	if len(l.entries) > 0 && i >= l.FirstIndex(){
+// 		offset := l.entries[0].Index
+// 		if i < offset || i - offset >= uint64(len(l.entries)){
+// 			return 0, ErrUnavailable
+// 		} else {
+// 			return l.entries[i-offset].Term, nil
+// 		}
+// 	} else {
+// 		_, err := l.storage.Term(i)
+// 		if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot){
+// 			// 代表此时这个条目在 snapshot 中，但快照还没有应用到状态机
+// 			if i == l.pendingSnapshot.Metadata.Index {
+// 				// i 等于 snapshot 的截断 idx，则直接返回截断 term
+// 				return l.pendingSnapshot.Metadata.Index, nil
+// 			} else if i < l.pendingSnapshot.Metadata.Index {
+// 				// 该条目已经被压缩，无法获得对应的 term
+// 				return 0, ErrCompacted
+// 			}
+// 		}
+// 		return 0, err
+// 	}
+// }
+
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	// 此时应该检查 storage
-	var term uint64
-	var err error
-	if len(l.entries) == 0 {
-		term, err = l.storage.Term(i)
-		if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot){
-			// 代表此时这个条目在 snapshot 中，但快照还没有应用到状态机
-			if i == l.pendingSnapshot.Metadata.Index {
-				// i 等于 snapshot 的截断 idx，则直接返回截断 term
-				term = l.pendingSnapshot.Metadata.Index
-				err = nil
-			} else if i < l.pendingSnapshot.Metadata.Index {
-				// 该条目已经被压缩，无法获得对应的 term
-				term = 0
-				err = ErrCompacted
-			}
-		}
-	} else {
+	if len(l.entries) > 0 && i >= l.FirstIndex() {
 		offset := l.entries[0].Index
 		if i < offset || i - offset >= uint64(len(l.entries)){
-			term = 0
-			err = nil
+			return 0, ErrUnavailable
 		} else {
-			term = l.entries[i-offset].Term
+			return l.entries[i-offset].Term, nil
+		}
+	}
+	term, err := l.storage.Term(i)
+	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
+		if i == l.pendingSnapshot.Metadata.Index {
+			term = l.pendingSnapshot.Metadata.Term
+			err = nil
+		} else if i < l.pendingSnapshot.Metadata.Index {
+			err = ErrCompacted
 		}
 	}
 	return term, err

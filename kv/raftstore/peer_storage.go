@@ -368,7 +368,6 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 // Apply the peer with given snapshot
 func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_util.WriteBatch, raftWB *engine_util.WriteBatch) (*ApplySnapResult, error) {
 	log.Infof("%v begin to apply snapshot", ps.Tag)
-	println("iamleizz++")
 	snapData := new(rspb.RaftSnapshotData)
 	if err := snapData.Unmarshal(snapshot.Data); err != nil {
 		return nil, err
@@ -383,7 +382,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		ps.clearMeta(kvWB, raftWB)
 		ps.clearExtraData(snapData.Region)
 	}
-	preRegion := ps.Region()
 	// 应用快照 
 	// 更新 rateState 和 applyState
 	ps.raftState.LastIndex = snapshot.Metadata.Index
@@ -407,14 +405,11 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 	<-finished
 
-	new_region := ps.Region()
-	applyres := &ApplySnapResult{
-		PrevRegion: preRegion,
-		Region: new_region,
-	}
+	applyres := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
 	// 将 kvwb 中的修改数据写入 DB 中
 	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
-	return applyres, nil
+	err := kvWB.WriteToDB(ps.Engines.Kv)
+	return applyres, err
 }
 
 // 将内存中的状态保存到磁盘。
@@ -474,12 +469,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		return nil, err
 	}
 	// 状态写入 DB 中
-	err = raftWB.WriteToDB(ps.Engines.Raft)
-	if err != nil {
-		return nil, err
-	}
-	err = kvWB.WriteToDB(ps.Engines.Kv)
-
+	raftWB.MustWriteToDB(ps.Engines.Raft)
 	return applySnap, err
 }
 
