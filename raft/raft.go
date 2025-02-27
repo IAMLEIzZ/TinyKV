@@ -844,6 +844,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 }
 
 // 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
+
 // handleSnapshot handle Snapshot RPC request
 // func (r *Raft) handleSnapshot(m pb.Message) {
 // 	// Your Code Here (2C).
@@ -880,7 +881,6 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // 		}
 // 	}
 // 	r.becomeFollower(meta.Term, m.From)
-
 // 	if len(meta.ConfState.Nodes) != 0 {
 // 		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
 // 		r.Prs = make(map[uint64]*Progress)
@@ -891,7 +891,6 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // 	}
 // 	// 将 snapshot 放入待安装的 snapshot 中，等待上层的 advance 处理
 // 	r.RaftLog.pendingSnapshot = m.Snapshot
-
 // 	msg := pb.Message{
 // 		MsgType: pb.MessageType_MsgAppendResponse,
 // 		From: r.id,
@@ -899,7 +898,6 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // 		Reject: rej,
 // 		Index: r.RaftLog.LastIndex(),
 // 	}
-
 // 	r.msgs = append(r.msgs, msg)
 // }
 
@@ -910,7 +908,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if r.Term < m.Term {
 		r.Term = m.Term
 		if r.State != StateFollower {
-			r.becomeFollower(r.Term,None)
+			r.becomeFollower(r.Term, m.From)
 		}
 	}
 	if m.Term < r.Term {
@@ -924,9 +922,6 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 
 	if shotIndex < r.RaftLog.committed || shotIndex < r.RaftLog.FirstIndex(){
 		return
-	}
-	if r.Lead != m.From {
-		r.Lead = m.From
 	}
 
 	// 丢弃之前的所有 entry
