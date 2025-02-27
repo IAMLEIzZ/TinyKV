@@ -464,6 +464,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 		r.sendVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
 	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
@@ -750,100 +751,75 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 
 // 当 follower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
 // handleAppendEntries handle AppendEntries RPC request
-func (r *Raft) handleAppendEntries(m pb.Message) {
-	// 拒绝 term 小的请求
-	m_term := m.GetTerm()
-	if m_term < r.Term {
-		return
+func (r *Raft) sendAppendResponse(m pb.Message, to uint64, idx uint64, rej bool) {
+	msg := pb.Message {
+		MsgType: pb.MessageType_MsgAppendResponse,
+		Reject: rej,
+		To: to,
+		Term: r.Term,
+		Index: idx,
+		From: r.id,
 	}
 
-	m_from := m.GetFrom()
-	m_entries := m.GetEntries()
-	// 一致性检查
-	var msg pb.Message
-	if f, match_idx := r.check(m); f {
-		//	一致性检查不通过，拒绝条目
-		msg = pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    r.id,
-			To:      m_from,
-			Term:    r.Term,
-			Index: r.RaftLog.LastIndex(),
-			Commit: r.RaftLog.committed,
-			Reject:  true,
-		}
-		r.msgs = append(r.msgs, msg)
-		r.electionElapsed = 0
-		return
-	} else {
-		// 一致性检查通过
-		// 1. msg 的最后一个条目被囊括，则直接返回成功
-		// 2. 如果没有囊括，则找到最后一个囊括的，将剩余的补充进去
-		// 3. 如果发生不一致冲突，则覆盖不一致部分
-		// 从 match_idx，开始检查条目是否匹配
-		r.becomeFollower(m_term, m_from)
-		k := 0
-		i := match_idx + 1
-		flag := false
-		for ; i < len(r.RaftLog.entries) && k < len(m_entries); i++ {
-			r_entry := r.RaftLog.entries[i]
-			m_entry := m_entries[k]
-			if r_entry.Index == m_entry.Index && r_entry.Term == m_entry.Term {
-				// 条目匹配
-				k++
-				continue
-			} else if r_entry.Index == m_entry.Index && r_entry.Term != m_entry.Term {
-				// 条目不匹配，则直接进行覆盖
-				flag = true
-				break
-			}
-		}
-		// log的初始长度
-		// len_idx := len(r.RaftLog.entries)
-		if !flag && k < len(m_entries) {
-			// 这代表所有的 log 都匹配完了，只剩追加部分
-			// 持久化之前的条目
-			// r.RaftLog.storage.(*MemoryStorage).Append(r.RaftLog.entries[:m.Index - r.RaftLog.entries[0].Index + 1])
-			// r.RaftLog.stabled = m.Index
-			// 从 k 开始追加
-			for ; k < len(m_entries); k++ {
-				r.RaftLog.entries = append(r.RaftLog.entries, *m_entries[k])
-				r.RaftLog.stabled = min(r.RaftLog.stabled, m_entries[k].Index-1)
-			}
-		}
-		if flag {
-			// 从 i 开始覆盖
-			// 持久化条目
-			// r.RaftLog.storage.(*MemoryStorage).Append(r.RaftLog.entries[:m.Index - r.RaftLog.entries[0].Index + 1])
-			// r.RaftLog.stabled = m.Index
-			r.RaftLog.entries = r.RaftLog.entries[:i]
-			for ; k < len(m_entries); k++ {
-				r.RaftLog.entries = append(r.RaftLog.entries, *m_entries[k])
-				r.RaftLog.stabled = min(r.RaftLog.stabled, m_entries[k].Index-1)
-			}
-		}
-
-		msg = pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From:    r.id,
-			To:      m_from,
-			Index:   r.RaftLog.LastIndex(),
-			Term:    r.Term,
-		}
-	}
-	r.electionElapsed = 0
-	// 更新 commited
-	// r.RaftLog.committed = min(r.RaftLog.LastIndex(), m.Commit)
-	// 在 Raft 协议中，跟随者处理 MsgAppend 消息时，committed 的更新需要遵循以下规则：
-	// 1. 不能超过本地日志的最后索引。
-	// 2. 如果没有新条目，committed 只能更新为消息中匹配的索引。
-	m_commit := m.GetCommit()
-	m_idx := m.GetIndex()
-	if m_commit > r.RaftLog.committed {
-		r.RaftLog.committed = min(m_idx+uint64(len(m_entries)), m_commit)
-	}
 	r.msgs = append(r.msgs, msg)
 }
+
+func (r *Raft) handleAppendEntries(m pb.Message) {
+	// 拒绝 term 小的请求
+	if m.Term < r.Term {
+		return
+	}
+
+	if r.Term <= m.Term {
+		r.electionElapsed = 0
+		r.becomeFollower(m.Term, m.From)
+	}
+
+	msg_prev_index, msg_prev_term := m.Index, m.LogTerm
+	// 当前 msg 的前序日志与 raft 节点的日志有 gap
+	if msg_prev_index > r.RaftLog.LastIndex() {
+		r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), true)
+		return 
+	}
+
+	term, err := r.RaftLog.Term(msg_prev_index)
+	if term != msg_prev_term && err == nil{
+		// 虽然日志的 index 匹配一致了，但是与term 匹配不一致，则拒绝添加日志
+		r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), true)
+		return
+	}
+	// prev_index 和 prev_term 都对上了，允许添加日志
+	for _, en := range m.Entries {
+		en_idx := en.Index
+		old_term, _ := r.RaftLog.Term(en_idx)
+		// 这里会有两种情况 
+		// 1. 是相同的条目，直接 Pass
+		// 2. 不是相同的，直接覆盖 或 追加
+		// 如果 en_idx 和 en.term 都和 r 中的日志没对应上，则代表这两个不是同一条日志，
+		if en_idx - r.RaftLog.FirstIndex() > uint64(len(r.RaftLog.entries)) || en_idx > r.RaftLog.LastIndex(){
+			// 追加
+			r.RaftLog.entries = append(r.RaftLog.entries, *en)
+		} else if old_term != en.Term {
+			// 不是同一条日志，需要覆盖
+			if en_idx < r.RaftLog.FirstIndex() {
+				r.RaftLog.entries = make([]pb.Entry , 0)
+			}else {
+				r.RaftLog.entries = r.RaftLog.entries[0 : en_idx - r.RaftLog.FirstIndex()]
+			}
+			// 追加
+			r.RaftLog.stabled = min(r.RaftLog.stabled, en_idx - 1)
+			r.RaftLog.entries = append(r.RaftLog.entries, *en)
+		}
+	}
+
+	// 当消息的提交信息大于该节点的提交信息时，更新提交信息
+	if m.Commit > r.RaftLog.committed {
+		r.RaftLog.committed = min(m.Index + uint64(len(m.Entries)), m.Commit)
+	}
+
+	r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), false)
+}
+
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
@@ -867,88 +843,127 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.msgs = append(r.msgs, msg)
 }
 
-// 当 Leader 收到心跳回应时，根据 prs 向发送者发送剩余条目
-// func (r *Raft) handleHeartbeatResponse(m pb.Message) {
-// 	m_from := m.GetFrom()
-// 	next_idx := r.Prs[m_from].Next
-// 	// 发送 next 后的所有条目
-// 	ents := make([]*pb.Entry, 0)
-// 	li := r.RaftLog.LastIndex()
-// 	idx := next_idx - r.RaftLog.entries[0].Index
-// 	for ; idx < uint64(len(r.RaftLog.entries)); idx++ {
-// 		ents = append(ents, &r.RaftLog.entries[idx])
+// 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
+// handleSnapshot handle Snapshot RPC request
+// func (r *Raft) handleSnapshot(m pb.Message) {
+// 	// Your Code Here (2C).
+// 	rej := false
+// 	if r.Term > m.Term {
+// 		// 非法请求
+// 		rej = true
 // 	}
-// 	lt, _ := r.RaftLog.Term(li)
-// 	r.heartbeatResp[m.From] = true
+// 	// 这里根据 snap 来修改 raft 的状态
+// 	// 根据 snap 的 node 信息，处理 peer
+// 	meta := m.Snapshot.Metadata
+// 	if meta.Index < r.RaftLog.committed {
+// 		// 代表此时的 snapshot 已过时
+// 		msg := pb.Message{
+// 			MsgType: pb.MessageType_MsgAppendResponse,
+// 			From: r.id,
+// 			To: m.From,
+// 			Reject: rej,
+// 			Index: r.RaftLog.committed,
+// 		}
+// 		r.msgs = append(r.msgs, msg)
+// 		return 
+// 	}
+// 	// 当 foolower 收到 snap 时，他的状态一定远远落后于 Leader，因此要直接按照 snapshot 更新状态
+// 	r.RaftLog.applied = meta.Index
+// 	r.RaftLog.committed = meta.Index
+// 	r.RaftLog.stabled = meta.Index
+// 	// 删除 raftlog 中当前的 entry
+// 	if len(r.RaftLog.entries) > 0 {
+// 		if meta.Index >= r.RaftLog.LastIndex() {
+// 			r.RaftLog.entries = nil
+// 		} else {
+// 			r.RaftLog.entries = r.RaftLog.entries[meta.Index - r.RaftLog.FirstIndex() + 1 :]
+// 		}
+// 	}
+// 	r.becomeFollower(meta.Term, m.From)
+
+// 	if len(meta.ConfState.Nodes) != 0 {
+// 		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
+// 		r.Prs = make(map[uint64]*Progress)
+// 		for _, id := range meta.ConfState.Nodes {
+// 			r.Prs[id] = &Progress{Next: meta.Index + 1, Match: meta.Index}
+// 			r.votes[id] = false
+// 		}
+// 	}
+// 	// 将 snapshot 放入待安装的 snapshot 中，等待上层的 advance 处理
+// 	r.RaftLog.pendingSnapshot = m.Snapshot
+
 // 	msg := pb.Message{
-// 		MsgType: pb.MessageType_MsgAppend,
-// 		From:    r.id,
-// 		To:      m_from,
-// 		Term:    r.Term,
-// 		Index:   next_idx - 1,
-// 		LogTerm: lt,
-// 		Entries: ents,
-// 		Commit:  r.RaftLog.committed,
+// 		MsgType: pb.MessageType_MsgAppendResponse,
+// 		From: r.id,
+// 		To: m.From,
+// 		Reject: rej,
+// 		Index: r.RaftLog.LastIndex(),
 // 	}
 
 // 	r.msgs = append(r.msgs, msg)
 // }
 
-// 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
-// handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
+	//fmt.Printf("%x receive snapshot from %x\n",r.id,m.From)
 	// Your Code Here (2C).
-	rej := false
-	if r.Term > m.Term {
-		// 非法请求
-		rej = true
-	}
-	// 这里根据 snap 来修改 raft 的状态
-	// 根据 snap 的 node 信息，处理 peer
-	meta := m.Snapshot.Metadata
-	if meta.Index < r.RaftLog.committed {
-		// 代表此时的 snapshot 已过时
-		msg := pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			From: r.id,
-			To: m.From,
-			Reject: rej,
-			Index: r.RaftLog.committed,
-		}
-		r.msgs = append(r.msgs, msg)
-		return 
-	}
-	// 当 foolower 收到 snap 时，他的状态一定远远落后于 Leader，因此要直接按照 snapshot 更新状态
-	r.RaftLog.applied = meta.Index
-	r.RaftLog.committed = meta.Index
-	r.RaftLog.stabled = meta.Index
-	// 删除 raftlog 中当前的 entry
-	r.RaftLog.entries = nil
-	// 将 snapshot 放入待安装的 snapshot 中，等待上层的 advance 处理
-	r.RaftLog.pendingSnapshot = m.Snapshot
-	r.Term = meta.Term
-	r.becomeFollower(meta.Term, m.From)
-	if len(meta.ConfState.Nodes) != 0 {
-		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
-		r.Prs = make(map[uint64]*Progress)
-		for _, id := range meta.ConfState.Nodes {
-			if id == r.id {
-				r.Prs[id] = &Progress{Next: meta.Index + 1, Match: meta.Index}
-			} else {
-				r.Prs[id] = &Progress{}
-			}
-			r.votes[id] = false
+	// 前置，更新 term 和 State
+	if r.Term < m.Term {
+		r.Term = m.Term
+		if r.State != StateFollower {
+			r.becomeFollower(r.Term,None)
 		}
 	}
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgAppendResponse,
-		From: r.id,
-		To: m.From,
-		Reject: rej,
-		Index: meta.Index,
+	if m.Term < r.Term {
+		return
 	}
 
-	r.msgs = append(r.msgs, msg)
+	metaData := m.Snapshot.Metadata
+	shotIndex := metaData.Index
+	shotTerm := metaData.Term
+	shotConf := metaData.ConfState
+
+	if shotIndex < r.RaftLog.committed || shotIndex < r.RaftLog.FirstIndex(){
+		return
+	}
+	if r.Lead != m.From {
+		r.Lead = m.From
+	}
+
+	// 丢弃之前的所有 entry
+	if len(r.RaftLog.entries) > 0 {
+		if shotIndex >= r.RaftLog.LastIndex() {
+			r.RaftLog.entries = nil
+		} else {
+			r.RaftLog.entries = r.RaftLog.entries[shotIndex - r.RaftLog.FirstIndex() + 1 :]
+		}
+	}
+
+	r.RaftLog.committed = shotIndex
+	r.RaftLog.applied = shotIndex
+	r.RaftLog.stabled = shotIndex
+
+	// 集群节点变更
+	if shotConf != nil {
+		r.Prs = make(map[uint64]*Progress)
+		for _, node := range shotConf.Nodes {
+			r.Prs[node] = &Progress{}
+			r.Prs[node].Next = r.RaftLog.LastIndex() + 1
+			r.Prs[node].Match = 0
+		}
+	}
+
+	if r.RaftLog.LastIndex() < shotIndex {
+		// 加一个空条目，以指明 lastIndex 和 lastTerm 与快照一致
+		entry := pb.Entry{
+			EntryType: pb.EntryType_EntryNormal,
+			Index: shotIndex,
+			Term: shotTerm,
+		}
+		r.RaftLog.entries = append(r.RaftLog.entries, entry)
+	}
+
+	r.RaftLog.pendingSnapshot = m.Snapshot
+	r.sendAppendResponse(m, m.From,r.RaftLog.LastIndex(),false)
 }
 
 // addNode add a new node to raft group
