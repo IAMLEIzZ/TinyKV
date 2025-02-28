@@ -137,10 +137,10 @@ func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraft
 	// create response
 	response := &raft_cmdpb.Response{
 		CmdType: raft_cmdpb.CmdType_Put,
-		Put: &raft_cmdpb.PutResponse{},
+		Put:     &raft_cmdpb.PutResponse{},
 	}
 	resp := &raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Header:    &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
 		Responses: make([]*raft_cmdpb.Response, 0),
 	}
 	resp.Responses = append(resp.Responses, response)
@@ -148,16 +148,16 @@ func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraft
 	d.processProposal(resp, entry, false)
 }
 
-//	处理 Delete 请求
+// 处理 Delete 请求
 func (d *peerMsgHandler) processDelRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	cf, key := req.Delete.Cf, req.Delete.Key
 	kvWB.DeleteCF(cf, key)
 	response := &raft_cmdpb.Response{
 		CmdType: raft_cmdpb.CmdType_Delete,
-		Put: &raft_cmdpb.PutResponse{},
+		Put:     &raft_cmdpb.PutResponse{},
 	}
 	resp := &raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Header:    &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
 		Responses: make([]*raft_cmdpb.Response, 0),
 	}
 	resp.Responses = append(resp.Responses, response)
@@ -169,13 +169,13 @@ func (d *peerMsgHandler) processGetRequest(req *raft_cmdpb.Request, entry *eraft
 	val, _ := engine_util.GetCF(d.ctx.engine.Kv, req.Get.Cf, req.Get.Key)
 	response := &raft_cmdpb.Response{
 		CmdType: raft_cmdpb.CmdType_Get,
-		Get: &raft_cmdpb.GetResponse{Value: val},
+		Get:     &raft_cmdpb.GetResponse{Value: val},
 	}
 	resp := &raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Header:    &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
 		Responses: make([]*raft_cmdpb.Response, 0),
 	}
-	resp.Responses = append(resp.Responses, response)	
+	resp.Responses = append(resp.Responses, response)
 	d.processProposal(resp, entry, false)
 }
 
@@ -183,13 +183,13 @@ func (d *peerMsgHandler) processGetRequest(req *raft_cmdpb.Request, entry *eraft
 func (d *peerMsgHandler) processSnapRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	response := &raft_cmdpb.Response{
 		CmdType: raft_cmdpb.CmdType_Snap,
-		Snap: &raft_cmdpb.SnapResponse{Region: d.Region()},
+		Snap:    &raft_cmdpb.SnapResponse{Region: d.Region()},
 	}
 	resp := &raft_cmdpb.RaftCmdResponse{
-		Header: &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
+		Header:    &raft_cmdpb.RaftResponseHeader{CurrentTerm: d.Term()},
 		Responses: make([]*raft_cmdpb.Response, 0),
 	}
-	resp.Responses = append(resp.Responses, response)	
+	resp.Responses = append(resp.Responses, response)
 	d.processProposal(resp, entry, true)
 }
 
@@ -389,7 +389,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if msg.AdminRequest != nil {
 		// 处理 admin 消息
 		d.proposeAdminCommand(msg, cb)
-		return 
+		return
 	}
 
 	// 普通请求

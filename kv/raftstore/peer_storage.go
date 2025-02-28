@@ -52,7 +52,7 @@ type PeerStorage struct {
 	Tag string
 }
 
-// NewPeerStorage 从存储引擎中获取持久化的 raftState，并返回一个 Peer 
+// NewPeerStorage 从存储引擎中获取持久化的 raftState，并返回一个 Peer
 // NewPeerStorage get the persist raftState from engines and return a peer storage
 func NewPeerStorage(engines *engine_util.Engines, region *metapb.Region, regionSched chan<- worker.Task, tag string) (*PeerStorage, error) {
 	log.Debugf("%s creating storage for %s", tag, region.String())
@@ -193,7 +193,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		return snapshot, err
 	}
 
-	// 生成 snapshot 
+	// 生成 snapshot
 	log.Infof("%s requesting snapshot", ps.Tag)
 	ps.snapTriedCnt++
 	ch := make(chan *eraftpb.Snapshot, 1)
@@ -201,7 +201,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 		StateType: snap.SnapState_Generating,
 		Receiver:  ch,
 	}
-	
+
 	// schedule snapshot generate task
 	ps.regionSched <- &runner.RegionTaskGen{
 		RegionId: ps.region.GetId(),
@@ -231,14 +231,14 @@ func (ps *PeerStorage) checkRange(low, high uint64) error {
 		// 代表当前传入的条目有一部分 idx 已经被提交过
 		return raft.ErrCompacted
 	} else if high > ps.raftState.LastIndex+1 {
-		// 代表不是该节点期望的条目 idx 
+		// 代表不是该节点期望的条目 idx
 		return errors.Errorf("entries' high %d is out of bound, lastIndex %d",
 			high, ps.raftState.LastIndex)
 	}
 	return nil
 }
 
-// 返回的是日志中被截断的条目的 idx 
+// 返回的是日志中被截断的条目的 idx
 func (ps *PeerStorage) truncatedIndex() uint64 {
 	return ps.applyState.TruncatedState.Index
 }
@@ -336,7 +336,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	// Your Code Here (2B).
 	// check
 	en_first_idx := entries[0].Index
-	en_last_idx := entries[len(entries) - 1].Index
+	en_last_idx := entries[len(entries)-1].Index
 	ps_first_idx, _ := ps.FirstIndex()
 	ps_last_idx, _ := ps.LastIndex()
 	var err error
@@ -349,7 +349,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	// eg. ps 5 6 7 8 9
 	//     en 2 3 4 5 6 ==> 应该提交 en 的 5、6，因为 2 3 4 是已经写入的 entry，7，8，9为无效 entry
 	if en_first_idx < ps_first_idx {
-		entries = entries[ps_first_idx - en_first_idx:]
+		entries = entries[ps_first_idx-en_first_idx:]
 	}
 	// 为每一个 log 设置 key 和 val
 	for _, e := range entries {
@@ -358,7 +358,7 @@ func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.Write
 	// 删除所有不会被提交的条目
 	// eg. ps 1 2 3 4 5
 	//     en 1 2 3 4  ==> 则 ps 的 5 为无效的条目
-	for i := en_last_idx + 1; i < ps_last_idx; i ++ {
+	for i := en_last_idx + 1; i < ps_last_idx; i++ {
 		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.Id, i))
 	}
 	return err
@@ -382,7 +382,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		ps.clearMeta(kvWB, raftWB)
 		ps.clearExtraData(snapData.Region)
 	}
-	// 应用快照 
+	// 应用快照
 	// 更新 rateState 和 applyState
 	ps.raftState.LastIndex = snapshot.Metadata.Index
 	ps.raftState.LastTerm = snapshot.Metadata.Term
@@ -400,7 +400,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		Notifier: finished,
 		SnapMeta: snapshot.Metadata,
 		StartKey: snapData.Region.StartKey,
-		EndKey: snapData.Region.EndKey,
+		EndKey:   snapData.Region.EndKey,
 	}
 
 	<-finished
@@ -428,8 +428,8 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 			Entries []pb.Entry (need to stable storage) RLS
 			Snapshot pb.Snapshot
 			CommittedEntries []pb.Entry (commit but not apply(already stable))
-			Messages []pb.Message 
-		}	
+			Messages []pb.Message
+		}
 	*/
 	var applySnap *ApplySnapResult = nil
 	raftWB := new(engine_util.WriteBatch)
@@ -444,7 +444,6 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		}
 	}
 
-
 	// 修改相对应的 RaftLocalState
 	re_len := len(ready.Entries)
 	// 把追加的条目写入 raftWB
@@ -453,8 +452,8 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		if err != nil {
 			return nil, err
 		}
-		newlogidx := ready.Entries[re_len - 1].Index
-		newlogterm := ready.Entries[re_len - 1].Term
+		newlogidx := ready.Entries[re_len-1].Index
+		newlogterm := ready.Entries[re_len-1].Term
 		if newlogidx > ps.raftState.LastIndex {
 			ps.raftState.LastIndex = newlogidx
 			ps.raftState.LastTerm = newlogterm

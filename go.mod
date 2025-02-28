@@ -21,6 +21,7 @@ require (
 	github.com/pingcap/tidb v1.1.0-beta.0.20200309111804-d8264d47f760
 	github.com/pingcap/tipb v0.0.0-20200212061130-c4d518eb1d60
 	github.com/pkg/errors v0.8.1
+	github.com/prometheus/common v0.4.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20200410134404-eec4a21b6bb0 // indirect
 	github.com/shirou/gopsutil/v3 v3.22.7
 	github.com/sirupsen/logrus v1.2.0
