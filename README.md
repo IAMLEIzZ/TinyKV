@@ -8,13 +8,13 @@
 - 实现原始的键值服务处理程序 ✅
   ![alt text](images/image_part1.png)
 
-## PartB (Raft KV)
+## PartB (Raft KV) ✅
 
 - 2A 实现基本的 Raft 算法 ✅
   ![alt text](images/image_part2A.png)
 - 2B 在 Raft 之上构建一个容错的键值服务器 ✅
 - ![alt text](images/image_part2B.png)
-- 2C 添加 Raft 日志垃圾回收和快照支持
+- 2C 添加 Raft 日志垃圾回收和快照支持 ✅
 - ![alt text](images/image_part2C.png)
 
 ## PartC (Multi-Raft KV)
