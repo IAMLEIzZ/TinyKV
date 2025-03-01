@@ -167,8 +167,7 @@ type Raft struct {
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
 
-	et int
-
+	et            int
 	reject_num    int
 	heartbeatResp map[uint64]bool
 }
@@ -214,6 +213,14 @@ func newRaft(c *Config) *Raft {
 		raft.RaftLog.applied = c.Applied
 	}
 
+	// 将 PendingConfIndex 更新为最早的未应用的 confchange 索引
+	for _, entry := range raft.RaftLog.allEntries() {
+		if entry.EntryType == pb.EntryType_EntryConfChange {
+			raft.PendingConfIndex = entry.Index
+			break
+		}
+	}
+
 	return raft
 }
 
@@ -245,7 +252,12 @@ func (r *Raft) tick() {
 			// 设置随机选举时间为 [et, 2 * et - 1]
 			r.electionElapsed = 0
 			r.electionTimeout = r.et + rand.Intn(r.et)
-			r.startElection()
+			if r.leadTransferee != 0{
+				r.leadTransferee = 0
+				r.becomeLeader()
+			} else {
+				r.startElection()
+			}
 		}
 	case StateCandidate:
 		// Candidate 要处理 electionTick，当 electionTimeout 来临后，重新发起投票请求
@@ -253,7 +265,8 @@ func (r *Raft) tick() {
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout {
 			// 当candidate 计时器到的时候，检查自己的投票数是否占大多数，如果不占大多数，则归零计数器，重启投票
-			if r.canbeLeader() {
+			if r.canbeLeader() || r.leadTransferee != 0 {
+				r.leadTransferee = 0
 				r.becomeLeader()
 			} else {
 				// 设置随机选举时间为 [et, 2 * et - 1]
@@ -261,7 +274,6 @@ func (r *Raft) tick() {
 				r.electionTimeout = r.et + rand.Intn(r.et)
 				r.startElection()
 			}
-
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
@@ -273,7 +285,7 @@ func (r *Raft) tick() {
 			r.heartbeatResp = make(map[uint64]bool)
 			r.heartbeatResp[r.id] = true
 			// 心跳回应数不超过一半，重新开始选举
-			if hbrNum*2 <= total {
+			if hbrNum * 2 <= total {
 				r.startElection()
 			}
 		}
@@ -305,6 +317,9 @@ func (r *Raft) canbeLeader() bool {
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
 	r.State = StateFollower
+	if r.leadTransferee == lead {
+		r.leadTransferee = 0
+	}
 	// 一个 follower 在一个任期内只能给同一个人投票
 	if r.Term != term {
 		r.Vote = None
@@ -335,7 +350,7 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.Lead = r.id
 	r.State = StateLeader
-
+	r.leadTransferee = 0
 	// 清空投票
 	for k := range r.votes {
 		if k != r.id {
@@ -351,7 +366,6 @@ func (r *Raft) becomeLeader() {
 	if len(r.Prs) < 2 {
 		r.RaftLog.committed = max(r.RaftLog.LastIndex(), r.RaftLog.committed)
 	}
-
 	r.bcastAppend()
 }
 
@@ -379,26 +393,25 @@ func (r *Raft) stepFollower(m pb.Message) {
 		r.startElection()
 	case pb.MessageType_MsgBeat:
 	case pb.MessageType_MsgPropose:
-		// 当传递给 follower 时，'MessageType_MsgPropose' 由发送方法存储在 follower 的邮箱（msgs）中。
-		// 它存储了发送者的 ID，稍后由 rafthttp 包转发给领导者。
-		// r.appendEntry(m)
-		r.msgs = append(r.msgs, m)
+		r.appendEntry(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
 		// follower 不会收到该消息
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgRequestVote:
-		// follower 收到请求投票消息时，进行投票
 		r.sendVote(m)
 	case pb.MessageType_MsgRequestVoteResponse:
-		// follower 收到投票响应无效
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
-		// follower 收到心跳回应，说明是从 Leader 退化的，无需处理
+	case pb.MessageType_MsgTimeoutNow:
+		// r.sendMsgHup(r.id)
+		r.startElection()
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
 }
 
@@ -406,16 +419,13 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	// 分消息类型处理
 	switch m.MsgType {
 	case pb.MessageType_MsgHup:
-		// 当 candidate 收到选举消息时，同样开始选举
 		r.startElection()
 	case pb.MessageType_MsgBeat:
 	case pb.MessageType_MsgPropose:
-		// 当传递给 candidate 时，'MessageType_MsgPropose' 被丢弃。
-		// r.appendEntry(m)
+		r.appendEntry(m)
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgAppendResponse:
-		// candidate 不会收到该消息
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgRequestVote:
 		r.sendVote(m)
@@ -437,6 +447,11 @@ func (r *Raft) stepCandidate(m pb.Message) {
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
+	case pb.MessageType_MsgTimeoutNow:
+		// r.sendMsgHup(r.id)
+		r.startElection()
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
 }
 
@@ -469,7 +484,49 @@ func (r *Raft) stepLeader(m pb.Message) {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.sendAppend(m.From)
+	case pb.MessageType_MsgTransferLeader:
+		r.handleTransferLeader(m)
 	}
+}
+
+
+func (r *Raft) sendMsgHup(to uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgHup,
+		To: to,
+	}
+
+	r.msgs = append(r.msgs, msg)
+}
+
+
+// handleTransferLeader Leader 转让领导权
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	_, exists := r.Prs[m.From]
+	if !exists {
+		return 
+	}
+	// 转移目标
+	target := m.From
+	// 将转移目标设置为terget， client 发送来请求时，发现该字段不为nil，拒绝接收请求
+	r.leadTransferee = target
+	if r.Prs[target].Next != r.RaftLog.LastIndex()+1 && r.State == StateLeader {
+		// 如果此时目标节点的日志不是最新状态，则发送 MsgAppend
+		r.sendAppend(target)
+		return
+	}
+	// 如果日志请求通过，则发送TimeoutNow
+	r.sendTimeoutNowMsg(m.From)
+}
+
+func (r *Raft) sendTimeoutNowMsg(to uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgTimeoutNow,
+		From:    r.id,
+		To:      to,
+	}
+
+	r.msgs = append(r.msgs, msg)
 }
 
 func (r *Raft) sendSnapshot(to uint64) {
@@ -541,8 +598,14 @@ func (r *Raft) sendAppend(to uint64) {
 
 // appendEntry leader 将消息加入日志列表中
 func (r *Raft) appendEntry(m pb.Message) {
-	// 如果是 follower
+	// 此时 leader 处于权利转让阶段
+	if r.State == StateLeader && r.leadTransferee != 0 {
+		return
+	}
+	// 如果是 follower, 消息转发
 	if r.State == StateFollower {
+		m.From = r.id
+		m.To = r.Lead
 		r.msgs = append(r.msgs, m)
 		return
 	}
@@ -560,6 +623,11 @@ func (r *Raft) appendEntry(m pb.Message) {
 		r.RaftLog.entries = append(r.RaftLog.entries, *mes)
 		r.Prs[r.id].Next = mes.Index + 1
 		r.Prs[r.id].Match = r.Prs[r.id].Next - 1
+		if mes.EntryType == pb.EntryType_EntryConfChange {
+			if r.PendingConfIndex <= r.RaftLog.applied {
+				r.PendingConfIndex = mes.Index
+			}
+		}
 		li++
 	}
 
@@ -611,10 +679,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	// 统计 commit 日志消息，遍历 r.prs，找到最小的match，然后更新
 	// 是否存在一下情况？idx = 3 的提交已经占了大多数，但是 id = 2 的提交还没有占大多数？（应该不存在）TODO.可能这里有 bug
 	// 每次收到消息都检查一下当前这个消息是不是通过大多数投票，如果通过则 leader 提交？
-	if follower_match_idx <= r.RaftLog.committed {
-		// 如果当前这个 id < r.Raftlog.committed，则代表该日志早就通过大多数投票被 leader 提交
-		return
-	}
+	// if follower_match_idx <= r.RaftLog.committed {
+	// 	// 如果当前这个 id < r.Raftlog.committed，则代表该日志早就通过大多数投票被 leader 提交
+	// 	return
+	// }
 
 	vote_num := 0
 	for k := range r.Prs {
@@ -622,14 +690,32 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			vote_num++
 		}
 	}
+
 	// 更新 Leader 的 commited
 	// 只有领导者当前任期的日志条目才会通过计算副本数提交，这个日志才会被通过计算副本数的方式提交
 	log_term, _ := r.RaftLog.Term(follower_match_idx)
-	if vote_num > (len(r.Prs)/2) && log_term == r.Term {
+	if vote_num > (len(r.Prs)/2) && log_term == r.Term && follower_match_idx > r.RaftLog.committed{
 		r.RaftLog.committed = max(follower_match_idx, r.RaftLog.committed)
 		// 如果有更新，则更新后再给所有节点发送一个append 请求，用于更新 follower 节点的 commited
 		r.sendAppendMessage()
 	}
+
+	if r.leadTransferee == m.From && r.Lead != r.leadTransferee && follower_match_idx == r.RaftLog.LastIndex() {
+		// 转入处理请求
+		r.sendTransferMsg(m.From)
+		return
+	}
+}
+
+// sendTransferMsg 发送 leader 变更请求
+func (r *Raft) sendTransferMsg(to_leader uint64) {
+	msg := pb.Message{
+		MsgType: pb.MessageType_MsgTransferLeader,
+		To:      r.id,
+		From:    to_leader,
+	}
+
+	r.msgs = append(r.msgs, msg)
 }
 
 // sendVote r 节点收到投票请求后进行响应
@@ -653,13 +739,15 @@ func (r *Raft) sendVote(m pb.Message) {
 		}
 	}
 
-	if r.Term < m_term {
+	if r.Term < m.Term {
 		r.becomeFollower(m_term, None)
 	}
-	// if r.State == StateLeader && r.Term >= m.Term{
-	// 	msg.Reject = true
-	// }
-	if r.Term >= m_term && r.State == StateCandidate {
+
+	if r.Term < m.Term && r.leadTransferee == m.From {
+		r.becomeFollower(m.Term, None)
+	}
+
+	if r.Term >= m.Term && r.State == StateCandidate {
 		msg.Reject = true
 	}
 
@@ -693,6 +781,11 @@ func (r *Raft) sendVote(m pb.Message) {
 
 // campagin
 func (r *Raft) startElection() {
+	// 如果此时节点不在集群中，则状态保持不变
+	_, exist := r.Prs[r.id]
+	if !exist {
+		return 
+	}
 	// 给自己投票
 	r.becomeCandidate()
 	// 发送请求投票消息给每一个节点
@@ -842,64 +935,6 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	r.msgs = append(r.msgs, msg)
 }
 
-// 当 follower 和 candidate 收到 snapshot 时，处理 snapshot
-
-// handleSnapshot handle Snapshot RPC request
-// func (r *Raft) handleSnapshot(m pb.Message) {
-// 	// Your Code Here (2C).
-// 	rej := false
-// 	if r.Term > m.Term {
-// 		// 非法请求
-// 		rej = true
-// 	}
-// 	// 这里根据 snap 来修改 raft 的状态
-// 	// 根据 snap 的 node 信息，处理 peer
-// 	meta := m.Snapshot.Metadata
-// 	if meta.Index < r.RaftLog.committed {
-// 		// 代表此时的 snapshot 已过时
-// 		msg := pb.Message{
-// 			MsgType: pb.MessageType_MsgAppendResponse,
-// 			From: r.id,
-// 			To: m.From,
-// 			Reject: rej,
-// 			Index: r.RaftLog.committed,
-// 		}
-// 		r.msgs = append(r.msgs, msg)
-// 		return
-// 	}
-// 	// 当 foolower 收到 snap 时，他的状态一定远远落后于 Leader，因此要直接按照 snapshot 更新状态
-// 	r.RaftLog.applied = meta.Index
-// 	r.RaftLog.committed = meta.Index
-// 	r.RaftLog.stabled = meta.Index
-// 	// 删除 raftlog 中当前的 entry
-// 	if len(r.RaftLog.entries) > 0 {
-// 		if meta.Index >= r.RaftLog.LastIndex() {
-// 			r.RaftLog.entries = nil
-// 		} else {
-// 			r.RaftLog.entries = r.RaftLog.entries[meta.Index - r.RaftLog.FirstIndex() + 1 :]
-// 		}
-// 	}
-// 	r.becomeFollower(meta.Term, m.From)
-// 	if len(meta.ConfState.Nodes) != 0 {
-// 		// 这里要直接将 Prs 清零，因为此时系统中的节点可能有变化 eg. 从 1 2 3 -> 2 3 4
-// 		r.Prs = make(map[uint64]*Progress)
-// 		for _, id := range meta.ConfState.Nodes {
-// 			r.Prs[id] = &Progress{Next: meta.Index + 1, Match: meta.Index}
-// 			r.votes[id] = false
-// 		}
-// 	}
-// 	// 将 snapshot 放入待安装的 snapshot 中，等待上层的 advance 处理
-// 	r.RaftLog.pendingSnapshot = m.Snapshot
-// 	msg := pb.Message{
-// 		MsgType: pb.MessageType_MsgAppendResponse,
-// 		From: r.id,
-// 		To: m.From,
-// 		Reject: rej,
-// 		Index: r.RaftLog.LastIndex(),
-// 	}
-// 	r.msgs = append(r.msgs, msg)
-// }
-
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// fmt.Printf("%x receive snapshot from %x\n",r.id,m.From)
 	// Your Code Here (2C).
@@ -965,9 +1000,52 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	// 增加节点
+	_, exist := r.Prs[id]
+	if exist {
+		// 节点已经存在
+		return 
+	}
+	if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
+		return 
+	}
+	r.Prs[id] = &Progress{}
+	r.votes[id] = false
+	for _, entry := range r.RaftLog.allEntries() {
+		if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
+			r.PendingConfIndex = entry.Index
+			break
+		}
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	_, exist := r.Prs[id]
+	if !exist {
+		// 节点不存在
+		return 
+	}
+	if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
+		return 
+	}
+	delete(r.Prs, id)
+	delete(r.votes, id)
+	for _, entry := range r.RaftLog.allEntries() {
+		if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
+			r.PendingConfIndex = entry.Index
+			break
+		}
+	}
+
+	// 当删除节点后，Leader 需要重新检查当前的提交，因为当节点被删除后，有的条目已经达到半数，可以选择提交
+	commite_map := make(map[uint64]uint64, 0)
+	for id := range r.Prs {
+		match_idx := r.Prs[id].Match
+		commite_map[match_idx] ++
+		if commite_map[match_idx] >= uint64(len(r.Prs) / 2) {
+			r.RaftLog.committed = max(r.RaftLog.committed, match_idx)
+		}
+	}
 }

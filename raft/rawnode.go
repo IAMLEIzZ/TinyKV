@@ -207,7 +207,7 @@ func (rn *RawNode) newReady() Ready {
 		rn.pre_softstate = softstate
 	} else {
 		rd.SoftState = nil
-		rn.pre_softstate = nil
+		// rn.pre_softstate = nil
 	}
 
 	if !IsEmptyHardState(rn.pre_hardstate) && 
@@ -261,8 +261,12 @@ func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
 	// 更新 rn.Raft 的进度
 	var msg []pb.Message
-	rn.pre_softstate = rd.SoftState
-	rn.pre_hardstate = rd.HardState
+	if rd.SoftState != nil {
+		rn.pre_softstate = rd.SoftState
+	}
+	if !IsEmptyHardState(rd.HardState) {
+		rn.pre_hardstate = rd.HardState
+	}
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries) - 1].Index
 	}
