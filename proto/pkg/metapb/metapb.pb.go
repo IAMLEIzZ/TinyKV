@@ -173,8 +173,10 @@ func (m *Store) GetState() StoreState {
 
 type RegionEpoch struct {
 	// Conf change version, auto increment when add or remove peer
+	// 配置变更版本，每次添加或移除 Peer 时递增
 	ConfVer uint64 `protobuf:"varint,1,opt,name=conf_ver,json=confVer,proto3" json:"conf_ver,omitempty"`
 	// Region version, auto increment when split or merge
+	// Region 版本，每次 Region 发生 **拆分（split）或合并（merge）** 时递增
 	Version              uint64   `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
 	XXX_NoUnkeyedLiteral struct{} `json:"-"`
 	XXX_unrecognized     []byte   `json:"-"`

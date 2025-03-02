@@ -564,12 +564,12 @@ func (r *Raft) sendAppend(to uint64) {
 	// 对应成员的目前日志复制进度，next 是成员希望收到的，-1 代表已经匹配到的 idx
 	prev_idx := r.Prs[to].Next - 1
 	// 获取已经匹配到的日志的 Term
-	prev_term, _ := r.RaftLog.Term(prev_idx)
+	prev_term, err := r.RaftLog.Term(prev_idx)
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
 	firstIndex := r.RaftLog.FirstIndex()
 	// 这里如果 firstIndex - 1 > prev_idx 的情况，则代表要发送 snapshot (if firstIndex - 1 > prev_idx && prev_idx != 0)
-	if firstIndex-1 > prev_idx {
+	if firstIndex - 1 > prev_idx || err != nil{
 		// println("send snapShot to", to)
 		r.sendSnapshot(to)
 		return

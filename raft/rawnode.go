@@ -137,6 +137,7 @@ func (rn *RawNode) Propose(data []byte) error {
 // ProposeConfChange 提议一个配置更改。
 // ProposeConfChange proposes a config change.
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
+	println("提议请求")
 	data, err := cc.Marshal()
 	if err != nil {
 		return err
