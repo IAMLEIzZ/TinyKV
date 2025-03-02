@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	"math/rand"
+	"sort"
 	"time"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
@@ -265,15 +266,10 @@ func (r *Raft) tick() {
 		r.electionElapsed++
 		if r.electionElapsed >= r.electionTimeout {
 			// 当candidate 计时器到的时候，检查自己的投票数是否占大多数，如果不占大多数，则归零计数器，重启投票
-			if r.canbeLeader() || r.leadTransferee != 0 {
-				r.leadTransferee = 0
-				r.becomeLeader()
-			} else {
-				// 设置随机选举时间为 [et, 2 * et - 1]
-				r.electionElapsed = 0
-				r.electionTimeout = r.et + rand.Intn(r.et)
-				r.startElection()
-			}
+			// 设置随机选举时间为 [et, 2 * et - 1]
+			r.electionElapsed = 0
+			r.electionTimeout = r.et + rand.Intn(r.et)
+			r.startElection()
 		}
 	case StateLeader:
 		r.heartbeatElapsed++
@@ -292,6 +288,10 @@ func (r *Raft) tick() {
 		// 心跳超时
 		if r.heartbeatElapsed >= r.heartbeatTimeout {
 			// 当心跳计时器到达时，则向初自己外的节点发送心跳
+			if r.leadTransferee != 0 {
+				// 转移目标宕机，保持 leader
+				r.leadTransferee = 0
+			}
 			r.heartbeatElapsed = 0
 			for k := range r.votes {
 				if k != r.id {
@@ -517,6 +517,7 @@ func (r *Raft) handleTransferLeader(m pb.Message) {
 	}
 	// 如果日志请求通过，则发送TimeoutNow
 	r.sendTimeoutNowMsg(m.From)
+	r.heartbeatElapsed = 0
 }
 
 func (r *Raft) sendTimeoutNowMsg(to uint64) {
@@ -677,28 +678,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	r.Prs[follower_id].Next = follower_match_idx + 1
 	r.Prs[follower_id].Match = r.Prs[follower_id].Next - 1
 	// 统计 commit 日志消息，遍历 r.prs，找到最小的match，然后更新
-	// 是否存在一下情况？idx = 3 的提交已经占了大多数，但是 id = 2 的提交还没有占大多数？（应该不存在）TODO.可能这里有 bug
-	// 每次收到消息都检查一下当前这个消息是不是通过大多数投票，如果通过则 leader 提交？
-	// if follower_match_idx <= r.RaftLog.committed {
-	// 	// 如果当前这个 id < r.Raftlog.committed，则代表该日志早就通过大多数投票被 leader 提交
-	// 	return
-	// }
-
-	vote_num := 0
-	for k := range r.Prs {
-		if r.Prs[k].Match >= follower_match_idx {
-			vote_num++
-		}
-	}
-
-	// 更新 Leader 的 commited
-	// 只有领导者当前任期的日志条目才会通过计算副本数提交，这个日志才会被通过计算副本数的方式提交
-	log_term, _ := r.RaftLog.Term(follower_match_idx)
-	if vote_num > (len(r.Prs)/2) && log_term == r.Term && follower_match_idx > r.RaftLog.committed{
-		r.RaftLog.committed = max(follower_match_idx, r.RaftLog.committed)
-		// 如果有更新，则更新后再给所有节点发送一个append 请求，用于更新 follower 节点的 commited
-		r.sendAppendMessage()
-	}
+	r.updateCommit()
 
 	if r.leadTransferee == m.From && r.Lead != r.leadTransferee && follower_match_idx == r.RaftLog.LastIndex() {
 		// 转入处理请求
@@ -844,7 +824,7 @@ func (r *Raft) check(m pb.Message) (bool, int) {
 
 // 当 follower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
 // handleAppendEntries handle AppendEntries RPC request
-func (r *Raft) sendAppendResponse(m pb.Message, to uint64, idx uint64, rej bool) {
+func (r *Raft) sendAppendResponse(to uint64, idx uint64, rej bool) {
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		Reject:  rej,
@@ -871,14 +851,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	msg_prev_index, msg_prev_term := m.Index, m.LogTerm
 	// 当前 msg 的前序日志与 raft 节点的日志有 gap
 	if msg_prev_index > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), true)
 		return
 	}
 
 	term, err := r.RaftLog.Term(msg_prev_index)
 	if term != msg_prev_term && err == nil {
 		// 虽然日志的 index 匹配一致了，但是与term 匹配不一致，则拒绝添加日志
-		r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), true)
 		return
 	}
 	// prev_index 和 prev_term 都对上了，允许添加日志
@@ -910,7 +890,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		r.RaftLog.committed = min(m.Index+uint64(len(m.Entries)), m.Commit)
 	}
 
-	r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), false)
+	r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), false)
 }
 
 // handleHeartbeat handle Heartbeat RPC request
@@ -994,7 +974,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	}
 	// fmt.Printf("%x want apply snapshot from %x\n",r.id,m.From)
 	r.RaftLog.pendingSnapshot = m.Snapshot
-	r.sendAppendResponse(m, m.From, r.RaftLog.LastIndex(), false)
+	r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), false)
 }
 
 // addNode add a new node to raft group
@@ -1040,12 +1020,30 @@ func (r *Raft) removeNode(id uint64) {
 	}
 
 	// 当删除节点后，Leader 需要重新检查当前的提交，因为当节点被删除后，有的条目已经达到半数，可以选择提交
-	commite_map := make(map[uint64]uint64, 0)
-	for id := range r.Prs {
-		match_idx := r.Prs[id].Match
-		commite_map[match_idx] ++
-		if commite_map[match_idx] >= uint64(len(r.Prs) / 2) {
-			r.RaftLog.committed = max(r.RaftLog.committed, match_idx)
+	r.updateCommit()
+}
+
+func (r *Raft) updateCommit() {
+    // 获取所有节点的 matchIndex 并排序（从大到小）
+	var match_idx_slice []uint64
+	for _, rp := range r.Prs {
+		match_idx_slice = append(match_idx_slice, rp.Match)
+	}
+	//  降序排序
+	sort.Slice(match_idx_slice, func (x, y int) bool {
+		return match_idx_slice[x] > match_idx_slice[y]
+	})
+	//  多数派满足数量
+	majority := len(r.Prs) / 2
+	for i, match_idx := range match_idx_slice {
+		// 多数派
+		if i >= majority {
+			t, _ := r.RaftLog.Term(match_idx)
+			if match_idx > r.RaftLog.committed && t == r.Term {
+				r.RaftLog.committed = match_idx
+				r.sendAppendMessage()
+				return
+			}
 		}
 	}
 }
