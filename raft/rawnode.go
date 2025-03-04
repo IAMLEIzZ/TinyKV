@@ -16,6 +16,7 @@ package raft
 
 import (
 	"errors"
+	// "fmt"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
@@ -87,25 +88,19 @@ type RawNode struct {
 	pre_hardstate pb.HardState
 }
 
+
 // NewRawNode 返回一个新的 RawNode(给定配置和 raft peers 列表)。
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
 	raft_node := newRaft(config)
-	softstate := &SoftState{
-		Lead: raft_node.Lead,
-		RaftState: raft_node.State,
-	}
-	hardstate := pb.HardState{
-		Term: raft_node.Term,
-		Vote: raft_node.Vote,
-		Commit: raft_node.RaftLog.committed,
-	}
+
 	rn := &RawNode{
 		Raft: raft_node,
-		pre_softstate: softstate,
-		pre_hardstate: hardstate,
 	}
+
+	rn.pre_softstate = rn.getSoftState()
+	rn.pre_hardstate = rn.getHardState()
 
 	return rn, nil
 }
@@ -137,11 +132,11 @@ func (rn *RawNode) Propose(data []byte) error {
 // ProposeConfChange 提议一个配置更改。
 // ProposeConfChange proposes a config change.
 func (rn *RawNode) ProposeConfChange(cc pb.ConfChange) error {
-	println("提议请求")
 	data, err := cc.Marshal()
 	if err != nil {
 		return err
 	}
+	// fmt.Printf("Node: %d 提议 changepeer 请求，请求 type 是 %d, 处理节点是 %d\n", rn.Raft.id, cc.ChangeType, cc.NodeId)
 	ent := pb.Entry{EntryType: pb.EntryType_EntryConfChange, Data: data}
 	return rn.Raft.Step(pb.Message{
 		MsgType: pb.MessageType_MsgPropose,
@@ -199,50 +194,52 @@ func (rn *RawNode) newReady() Ready {
 		Messages: rn.Raft.msgs,
 	}
 
-	if rn.pre_softstate != nil && (rn.Raft.Lead != rn.pre_softstate.Lead || rn.Raft.State != rn.pre_softstate.RaftState) {
-		softstate := &SoftState{
-			Lead: rn.Raft.Lead,
-			RaftState: rn.Raft.State,
-		}
+	if softstate := rn.getSoftState(); !softstate.isSoftStateEqual(rn.pre_softstate) {
 		rd.SoftState = softstate
-		rn.pre_softstate = softstate
-	} else {
-		rd.SoftState = nil
-		// rn.pre_softstate = nil
-	}
+		rn.pre_softstate =softstate
+	} 
 
-	if !IsEmptyHardState(rn.pre_hardstate) && 
-	(rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
-	rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit) {
-		hardstate := pb.HardState{
-			Term: rn.Raft.Term,
-			Vote: rn.Raft.Vote,
-			Commit: rn.Raft.RaftLog.committed,
-		}
+	if hardstate := rn.getHardState(); !isHardStateEqual(hardstate, rn.pre_hardstate) {
 		rd.HardState = hardstate
 		rn.pre_hardstate = hardstate
 	}
+
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot){
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
 	return rd
 }
 
+func (rn *RawNode) getHardState() pb.HardState {
+	return pb.HardState{
+		Term: rn.Raft.Term,
+		Vote: rn.Raft.Vote,
+		Commit: rn.Raft.RaftLog.committed,
+	}
+}
+
+func (a *SoftState) isSoftStateEqual(b *SoftState) bool {
+	return a.Lead == b.Lead && a.RaftState == b.RaftState
+}
+
+func (rn *RawNode) getSoftState() *SoftState {
+	return &SoftState{
+		Lead: rn.Raft.Lead,
+		RaftState: rn.Raft.State,
+	}
+}
+
 // HasReady 在 RawNode 用户需要检查是否有任何 Ready 待处理时调用。
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
-	if rn.pre_softstate != nil {
-		if rn.Raft.Lead != rn.pre_softstate.Lead || rn.Raft.State != rn.pre_softstate.RaftState {
-			return true
-		}
+	gs := rn.getSoftState()
+	if !gs.isSoftStateEqual(rn.pre_softstate) {
+		return true
 	}
 
-	if !isHardStateEqual(rn.pre_hardstate, pb.HardState{}) {
-		if rn.Raft.Term != rn.pre_hardstate.Term || rn.Raft.Vote != rn.pre_hardstate.Vote || 
-			rn.Raft.RaftLog.committed != rn.pre_hardstate.Commit {
-			return true
-		}
+	if hs := rn.getHardState(); !IsEmptyHardState(hs) && !isHardStateEqual(hs, rn.pre_hardstate) {
+		return true
 	}
 
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot){

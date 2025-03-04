@@ -62,6 +62,7 @@ func (sw *storeWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 			return
 		case msg = <-sw.receiver:
 		}
+		// 收到消息时处理消息
 		sw.handleMsg(msg)
 	}
 }
@@ -75,6 +76,7 @@ func (d *storeWorker) onTick(tick StoreTick) {
 	}
 }
 
+// storeWorker处理收到的消息
 func (d *storeWorker) handleMsg(msg message.Msg) {
 	switch msg.Type {
 	case message.MsgTypeStoreRaftMessage:
@@ -149,14 +151,18 @@ func (d *storeWorker) checkMsg(msg *rspb.RaftMessage) (bool, error) {
 	return false, nil
 }
 
+// 处理 Raft 相关的消息
 func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	regionID := msg.RegionId
+	// 尝试直接转发消息
 	if err := d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeRaftMessage, Data: msg}); err == nil {
 		return nil
 	}
+	// peer 不存在，往下执行
 	log.Debugf("handle raft message. from_peer:%d, to_peer:%d, store:%d, region:%d, msg:%+v",
 		msg.FromPeer.Id, msg.ToPeer.Id, d.storeState.id, regionID, msg.Message)
 	if msg.ToPeer.StoreId != d.ctx.store.Id {
+		// 如果 msg.ToPeer.StoreId 不是当前 store，说明该消息不属于当前节点，直接忽略。
 		log.Warnf("store not match, ignore it. store_id:%d, to_store_id:%d, region_id:%d",
 			d.ctx.store.Id, msg.ToPeer.StoreId, regionID)
 		return nil
@@ -168,6 +174,7 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	}
 	if msg.IsTombstone {
 		// Target tombstone peer doesn't exist, so ignore it.
+		// 如果目标 peer 不存在，忽略消息
 		return nil
 	}
 	ok, err := d.checkMsg(msg)
@@ -177,6 +184,7 @@ func (d *storeWorker) onRaftMessage(msg *rspb.RaftMessage) error {
 	if ok {
 		return nil
 	}
+	// 如果 peer 不存在，尝试创建
 	created, err := d.maybeCreatePeer(regionID, msg)
 	if err != nil {
 		return err
@@ -198,9 +206,12 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	meta := d.ctx.storeMeta
 	meta.Lock()
 	defer meta.Unlock()
+	// 检查 RegionID 是否存在
 	if _, ok := meta.regions[regionID]; ok {
+		// 如果 已经存在，说明在这个 store 上该 peer 早已被创建，直接返回 true，不需要重复创建。
 		return true, nil
 	}
+	// 判断 Msg 是否是心跳信息，只有心跳信息才会创建 peer
 	if !util.IsInitialMsg(msg.Message) {
 		log.Debugf("target peer %s doesn't exist", msg.ToPeer)
 		return false, nil
@@ -217,6 +228,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 		return false, nil
 	}
 
+	// 记录 peer 并注册到 router
 	peer, err := replicatePeer(
 		d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, regionID, msg.ToPeer)
 	if err != nil {
@@ -225,6 +237,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 	// following snapshot may overlap, should insert into regionRanges after
 	// snapshot is applied.
 	meta.regions[regionID] = peer.Region()
+	// 注册 peer 并启动
 	d.ctx.router.register(peer)
 	_ = d.ctx.router.send(regionID, message.Msg{Type: message.MsgTypeStart})
 	return true, nil

@@ -2,6 +2,7 @@ package raftstore
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -51,10 +52,22 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		// 如果有未处理的消息
 		ready := d.RaftGroup.Ready()
 		// 先持久化状态，并获取快照 （处理 hardstate， softstate， entry，snapshot）
-		_, err := d.peerStorage.SaveReadyState(&ready)
+		applySnapshot, err := d.peerStorage.SaveReadyState(&ready)
 		if err != nil {
 			log.Panic(ErrResp(err))
 		}
+		// 当快照应用后，region 信息如果改变，则需要修改 peer 中的 regionrange 
+		if applySnapshot != nil {
+			if !reflect.DeepEqual(applySnapshot.PrevRegion, applySnapshot.Region) {
+				d.peerStorage.SetRegion(applySnapshot.Region)
+				d.ctx.storeMeta.Lock()
+				d.ctx.storeMeta.regions[applySnapshot.Region.Id] = applySnapshot.Region
+				d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: applySnapshot.PrevRegion})
+				d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: applySnapshot.Region})
+				d.ctx.storeMeta.Unlock()
+			}
+		}
+
 		// 发送消息（处理 message）
 		d.Send(d.ctx.trans, ready.Messages)
 		// 处理需要 apply 的消息 （处理 commitedEntry）
@@ -64,57 +77,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			if en.EntryType == eraftpb.EntryType_EntryConfChange {
 				// RegionLocalState，包括 RegionEpoch (d.peer.peerStorage.region.RegionEpoch) 和 Region (d.peer.peerStorage.region.Peers) 中的 Peers
 				// addNode 和 deleteNode
-				req := new(eraftpb.ConfChange)
-				err := req.Unmarshal(en.Data)
-				if err != nil {
-					log.Panic(ErrResp(err))
-				}
-				println("处理 changepeer 请求")
-				changetype := req.ChangeType
-				nodeId := req.NodeId
-				d_region := d.peer.peerStorage.region
-				resp := d.createAdminResp(raft_cmdpb.AdminCmdType_ChangePeer)
-				resp.AdminResponse.ChangePeer.Region = d.Region()
-				if changetype == eraftpb.ConfChangeType_AddNode {
-					// AddNode
-					if f, _ := d.checkNodeExist(nodeId); !f {
-						// 如果节点不存在，则添加
-						// 配置版本递增
-						var cc eraftpb.ConfChange
-						cc.Unmarshal(en.Data)
-						d_region.RegionEpoch.ConfVer++
-						// 在 Region 中加入 peer
-						// d.peer.peerCache[node.StoreId] = node
-						// d_region.Peers = append(d_region.Peers, node)
-						// d.peer.PeersStartPendingTime[node.Id] = time.Now()
-						// 持久化
-						kvWB.SetMeta(meta.RegionStateKey(d.Region().GetId()), d.Region())
-						d.RaftGroup.ApplyConfChange(cc)
-						d.processProposal(resp, &en, false)
-					}
-				} else {
-					// RemoveNode
-					if f, idx := d.checkNodeExist(nodeId); f {
-						// 节点存在才能删除
-						var cc eraftpb.ConfChange
-						cc.Unmarshal(en.Data)
-						d_region.RegionEpoch.ConfVer++
-						// 在 Region 中删除 peer
-						d_region.Peers[idx] = d_region.Peers[len(d_region.Peers)-1]
-						d_region.Peers = d_region.Peers[:len(d_region.Peers)-1]
-						// 删除缓存数据
-						// delete(d.peer.peerCache, node.StoreId)
-						// 持久化
-						kvWB.SetMeta(meta.RegionStateKey(d.Region().GetId()), d.Region())
-						d.RaftGroup.ApplyConfChange(cc)
-						d.processProposal(resp, &en, false)
-						kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
-						// 销毁节点
-						d.destroyPeer()
-						d.RaftGroup.Advance(ready)
-						return
-					}
-				}
+				d.processConfChange(&en, kvWB)
 			} else {
 				// 转入 Normal 请求处理函数
 				req := new(raft_cmdpb.RaftCmdRequest)
@@ -122,25 +85,13 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				if err != nil {
 					log.Panic(ErrResp(err))
 				}
-				adminReq := req.GetAdminRequest()
-				if adminReq != nil {
-					switch adminReq.CmdType {
-					case raft_cmdpb.AdminCmdType_CompactLog:
-						// SaveReadyState 中已经应用了 snapshot，因此这里直接用修改好的 truncatedIndex 创建一个压缩日志任务
-						if adminReq.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
-							d.peerStorage.applyState.TruncatedState.Index, d.peerStorage.applyState.TruncatedState.Term = adminReq.CompactLog.CompactIndex, adminReq.CompactLog.CompactTerm
-							kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
-							d.ScheduleCompactLog(adminReq.CompactLog.CompactIndex)
-						}
-						resp := d.createAdminResp(raft_cmdpb.AdminCmdType_CompactLog)
-						d.processProposal(resp, &en, false)
-					}
-				} else {
-					// 处理读写普通请求
-					d.processNormalRequest(req, &en, kvWB)
-				}
+				d.processNormalRequest(req, &en, kvWB)
 			}
+			if d.stopped {
+				return
+			}		
 			// 向 kv 数据库中写入
+			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)	
 			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
 		}
 		d.RaftGroup.Advance(ready)
@@ -159,6 +110,110 @@ func (d *peerMsgHandler) checkNodeExist(id uint64) (bool, int) {
 
 	return false, -1
 }
+
+// AddNode
+func (d *peerMsgHandler) processAddNode() {
+	
+}
+
+// 处理 peer 变更请求
+func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	var cc eraftpb.ConfChange	
+	req := new(raft_cmdpb.RaftCmdRequest)
+	err := cc.Unmarshal(entry.Data)
+	if err != nil {
+		log.Panic("ConfChange Unmarshal error")
+	}
+	err = req.Unmarshal(cc.Context)
+	if err != nil {
+		log.Panic("Admin req Unmarshal error")
+	}
+	header := req.Header
+	// check regionEpoch
+	if header.RegionEpoch != nil {
+		req_epoch := header.RegionEpoch
+		if req_epoch != nil && util.IsEpochStale(req_epoch, d.Region().RegionEpoch){
+			resp := ErrResp(&util.ErrEpochNotMatch{})
+			log.Infof("请求配置版本过期，忽略请求")
+			d.processProposal(resp, entry, false)
+			return
+		}
+	}
+	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_ChangePeer)
+	resp.AdminResponse.ChangePeer.Region = d.Region()
+	peer := req.AdminRequest.ChangePeer.Peer
+	changetype := cc.ChangeType
+	peerId := peer.Id
+	d_region := d.Region()
+	if changetype == eraftpb.ConfChangeType_AddNode {
+		d.RaftGroup.ApplyConfChange(cc)
+		// AddNode
+		f, _ := d.checkNodeExist(peerId)
+		if f {
+			log.Infof("Node: %d 已经存在", peerId)
+		} else {
+			// fmt.Printf("Node:%d 处理 changepeer 请求, type 是 AddNode, 处理节点是 %d\n", d.peer.Meta.Id, peer.Id)
+			d.ctx.storeMeta.Lock()
+			d_region.RegionEpoch.ConfVer ++
+			newPeer := &metapb.Peer{
+				Id: cc.NodeId,
+				StoreId: peer.StoreId,
+			}
+			d.peer.insertPeerCache(newPeer)	
+			d_region.Peers = append(d_region.Peers, newPeer)
+			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+			d.ctx.storeMeta.Unlock()
+		}
+		d.processProposal(resp, entry, false)
+		d.notifyHeartbeatScheduler(d.Region(),d.peer)
+	} else {
+		d.RaftGroup.ApplyConfChange(cc)
+		// RemoveNode
+		// 在 Region 的 peer 列表中删除 peer
+		f, idx := d.checkNodeExist(peerId)
+		if !f {
+			log.Infof("Node: %d 不存在", peerId)
+			d.processProposal(resp, entry, false)
+			return 
+		}
+		// fmt.Printf("Node:%d 处理 changepeer 请求, type 是 DeleteNode, 处理节点是 %d\n", d.peer.Meta.Id, peer.Id)
+		// 如果此时正好是要被删除的节点，则销毁节点
+		if d.PeerId() == peerId {
+			kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId))
+			d.destroyPeer()
+			return 
+		} else if f {
+			// 配置版本递增
+			d.ctx.storeMeta.Lock()
+			d_region.RegionEpoch.ConfVer ++
+			// 移除 peer
+			d_region.Peers[idx] = d_region.Peers[len(d_region.Peers) - 1]
+			d_region.Peers = d_region.Peers[:len(d_region.Peers) - 1]
+			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+			d.peer.removePeerCache(peerId)
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+			d.ctx.storeMeta.Unlock()
+		}
+		d.processProposal(resp, entry, false)
+		d.notifyHeartbeatScheduler(d.Region(),d.peer)
+	}
+}
+
+func (d *peerMsgHandler) notifyHeartbeatScheduler(region *metapb.Region, peer *peer) {
+	clonedRegion := new(metapb.Region)
+	err := util.CloneMsg(region, clonedRegion)
+	if err != nil {
+		return
+	}
+	d.ctx.schedulerTaskSender <- &runner.SchedulerRegionHeartbeatTask{
+		Region:          clonedRegion,
+		Peer:            peer.Meta,
+		PendingPeers:    peer.CollectPendingPeers(),
+		ApproximateSize: peer.ApproximateSize,
+	}
+}
+
 
 // 处理函数回调
 func (d *peerMsgHandler) processProposal(resp *raft_cmdpb.RaftCmdResponse, entry *eraftpb.Entry, isSanpRequest bool) {
@@ -224,8 +279,29 @@ func (d *peerMsgHandler) processSnapRequest(req *raft_cmdpb.Request, entry *eraf
 	d.processProposal(resp, entry, true)
 }
 
+func (d *peerMsgHandler) processCompactLog(req *raft_cmdpb.AdminRequest, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	// SaveReadyState 中已经应用了 snapshot，因此这里直接用修改好的 truncatedIndex 创建一个压缩日志任务
+	if req.CompactLog.CompactIndex > d.peerStorage.applyState.TruncatedState.Index {
+		d.peerStorage.applyState.TruncatedState.Index, d.peerStorage.applyState.TruncatedState.Term = req.CompactLog.CompactIndex, req.CompactLog.CompactTerm
+		kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
+		d.ScheduleCompactLog(req.CompactLog.CompactIndex)
+	}
+	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_CompactLog)
+	d.processProposal(resp, entry, false)
+}
+
 // 处理 normal request
 func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	// 处理管理员普通请求（split, compact）
+	if req.AdminRequest != nil {
+		switch req.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			d.processCompactLog(req.AdminRequest, entry, kvWB)
+		case raft_cmdpb.AdminCmdType_Split:
+		}
+		// 管理员请求与普通请求不会在同一个条目中
+		return 
+	}
 	// 对传入的 msg 分别进行判断
 	for _, r := range req.Requests {
 		switch r.CmdType {
@@ -387,6 +463,10 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 
 // ChangePeer 提议
 func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic("changepeer marshal err")
+	}
 	peerId := msg.AdminRequest.ChangePeer.Peer.Id
 	changeType := msg.AdminRequest.ChangePeer.ChangeType
 	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
@@ -394,6 +474,7 @@ func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *m
 	cc := eraftpb.ConfChange{
 		ChangeType: changeType,
 		NodeId:     peerId,
+		Context: data,
 	}
 	d.RaftGroup.ProposeConfChange(cc)
 }

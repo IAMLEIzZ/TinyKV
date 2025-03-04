@@ -194,7 +194,7 @@ func (ps *PeerStorage) Snapshot() (eraftpb.Snapshot, error) {
 	}
 
 	// 生成 snapshot
-	log.Infof("%s requesting snapshot", ps.Tag)
+	// log.Infof("%s requesting snapshot", ps.Tag)
 	ps.snapTriedCnt++
 	ch := make(chan *eraftpb.Snapshot, 1)
 	ps.snapState = snap.SnapState{
@@ -448,10 +448,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	re_len := len(ready.Entries)
 	// 把追加的条目写入 raftWB
 	if re_len != 0 {
-		err = ps.Append(ready.Entries, raftWB)
-		if err != nil {
-			return nil, err
-		}
+		ps.Append(ready.Entries, raftWB)
 		newlogidx := ready.Entries[re_len-1].Index
 		newlogterm := ready.Entries[re_len-1].Term
 		if newlogidx > ps.raftState.LastIndex {
@@ -463,10 +460,7 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 		ps.raftState.HardState = &ready.HardState
 	}
 	// RaftLocalstate 写入 raftWB 中
-	err = raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
-	if err != nil {
-		return nil, err
-	}
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState)
 	// 状态写入 DB 中
 	raftWB.MustWriteToDB(ps.Engines.Raft)
 	return applySnap, err

@@ -16,10 +16,12 @@ package raft
 
 import (
 	"errors"
+	// "fmt"
 	"math/rand"
 	"sort"
 	"time"
 
+	"github.com/pingcap-incubator/tinykv/log"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
 
@@ -215,12 +217,12 @@ func newRaft(c *Config) *Raft {
 	}
 
 	// 将 PendingConfIndex 更新为最早的未应用的 confchange 索引
-	for _, entry := range raft.RaftLog.allEntries() {
-		if entry.EntryType == pb.EntryType_EntryConfChange {
-			raft.PendingConfIndex = entry.Index
-			break
-		}
-	}
+	// for _, entry := range raft.RaftLog.allEntries() {
+	// 	if entry.EntryType == pb.EntryType_EntryConfChange {
+	// 		raft.PendingConfIndex = entry.Index
+	// 		break
+	// 	}
+	// }
 
 	return raft
 }
@@ -229,13 +231,11 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
 	// 提醒发送心跳
-
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeat,
 		From:    r.id,
 		To:      to,
 		Term:    r.Term,
-		Commit:  r.RaftLog.committed,
 	}
 
 	r.msgs = append(r.msgs, msg)
@@ -293,8 +293,9 @@ func (r *Raft) tick() {
 				r.leadTransferee = 0
 			}
 			r.heartbeatElapsed = 0
-			for k := range r.votes {
-				if k != r.id {
+			for k := range r.Prs {
+				_, ok := r.Prs[k]
+				if k != r.id && ok{
 					r.sendHeartbeat(k)
 				}
 			}
@@ -353,7 +354,8 @@ func (r *Raft) becomeLeader() {
 	r.leadTransferee = 0
 	// 清空投票
 	for k := range r.votes {
-		if k != r.id {
+		_, ok := r.votes[k]
+		if k != r.id && ok{
 			r.votes[k] = false
 		}
 	}
@@ -462,8 +464,9 @@ func (r *Raft) stepLeader(m pb.Message) {
 		// Leader 收到选举消息无效
 	case pb.MessageType_MsgBeat:
 		// 提醒自己发心跳
-		for k := range r.votes {
-			if k != r.id {
+		for k := range r.Prs {
+			_, ok := r.Prs[k]
+			if k != r.id && ok{
 				r.sendHeartbeat(k)
 			}
 		}
@@ -558,6 +561,11 @@ func (r *Raft) sendSnapshot(to uint64) {
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) {
+	_, ok := r.Prs[to]
+	if !ok {
+		log.Infof("节点 %d 不存在", to)
+		return 
+	}
 	// Your Code Here (2A).
 	// 要根据每一个成员的进度获取
 	// 从 r 的 storage 中获取日志条目，并且发送
@@ -624,11 +632,11 @@ func (r *Raft) appendEntry(m pb.Message) {
 		r.RaftLog.entries = append(r.RaftLog.entries, *mes)
 		r.Prs[r.id].Next = mes.Index + 1
 		r.Prs[r.id].Match = r.Prs[r.id].Next - 1
-		if mes.EntryType == pb.EntryType_EntryConfChange {
-			if r.PendingConfIndex <= r.RaftLog.applied {
-				r.PendingConfIndex = mes.Index
-			}
-		}
+		// if mes.EntryType == pb.EntryType_EntryConfChange {
+		// 	if r.PendingConfIndex <= r.RaftLog.applied {
+		// 		r.PendingConfIndex = mes.Index
+		// 	}
+		// }
 		li++
 	}
 
@@ -643,7 +651,8 @@ func (r *Raft) appendEntry(m pb.Message) {
 
 func (r *Raft) sendAppendMessage() {
 	for id := range r.Prs {
-		if id != r.id {
+		_, ok := r.Prs[id]
+		if id != r.id && ok{
 			r.sendAppend(id)
 		}
 	}
@@ -660,6 +669,14 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.State == StateFollower || r.State == StateCandidate {
 		return
 	}
+
+	if _, exist := r.Prs[m.From]; !exist {
+		log.Infof("节点 %d 已经不存在", m.From)
+		return 
+	}
+
+	log.Infof("成功接收到来自 %d 的 Append 回应", m.From)
+
 	if m.Index > r.Prs[m.From].Match && m.GetReject() {
 		r.Prs[m.From].Match = m.Index
 		r.Prs[m.From].Next = m.Index + 1
@@ -769,7 +786,7 @@ func (r *Raft) startElection() {
 	// 给自己投票
 	r.becomeCandidate()
 	// 发送请求投票消息给每一个节点
-	for k := range r.votes {
+	for k := range r.Prs {
 		if k == r.id {
 			continue
 		}
@@ -787,39 +804,6 @@ func (r *Raft) startElection() {
 	}
 	// 投票后选举计时器清零
 	r.electionElapsed = 0
-}
-
-// 一致性检查
-func (r *Raft) check(m pb.Message) (bool, int) {
-	idx := -1
-	flag := true
-	prev_term := m.GetLogTerm()
-	prev_index := m.GetIndex()
-
-	if prev_index == 0 {
-		flag = false
-		return flag, idx
-	}
-
-	// 已经匹配
-	if len(r.RaftLog.entries) == 0 {
-		t, err := r.RaftLog.Term(prev_index)
-		if r.Prs[r.id].Match == prev_index && (err == ErrCompacted || t == prev_term) {
-			flag = false
-			return flag, idx
-		}
-	}
-
-	for i, ent := range r.RaftLog.entries {
-		//  匹配成功，继续执行
-		if ent.Index == prev_index && ent.Term == prev_term {
-			flag = false
-			idx = i
-			break
-		}
-	}
-
-	return flag, idx
 }
 
 // 当 follower 和 candidate 收到日志复制通知后，在复制完后，会告知 Leader，
@@ -952,9 +936,10 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.RaftLog.committed = shotIndex
 	r.RaftLog.applied = shotIndex
 	r.RaftLog.stabled = shotIndex
-
+	
 	// 集群节点变更
 	if shotConf != nil {
+		// fmt.Printf("处理 snapshot, 节点数从 %d --> %d\n", len(r.Prs), len(shotConf.Nodes))
 		r.Prs = make(map[uint64]*Progress)
 		for _, node := range shotConf.Nodes {
 			r.Prs[node] = &Progress{}
@@ -984,19 +969,20 @@ func (r *Raft) addNode(id uint64) {
 	_, exist := r.Prs[id]
 	if exist {
 		// 节点已经存在
+		println("节点已经存在")
 		return 
 	}
-	if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
-		return 
-	}
+	// if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
+	// 	return 
+	// }
 	r.Prs[id] = &Progress{}
 	r.votes[id] = false
-	for _, entry := range r.RaftLog.allEntries() {
-		if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
-			r.PendingConfIndex = entry.Index
-			break
-		}
-	}
+	// for _, entry := range r.RaftLog.allEntries() {
+	// 	if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
+	// 		r.PendingConfIndex = entry.Index
+	// 		break
+	// 	}
+	// }
 }
 
 // removeNode remove a node from raft group
@@ -1007,20 +993,22 @@ func (r *Raft) removeNode(id uint64) {
 		// 节点不存在
 		return 
 	}
-	if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
-		return 
-	}
+	// if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
+	// 	return 
+	// }
 	delete(r.Prs, id)
 	delete(r.votes, id)
-	for _, entry := range r.RaftLog.allEntries() {
-		if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
-			r.PendingConfIndex = entry.Index
-			break
-		}
-	}
+	// for _, entry := range r.RaftLog.allEntries() {
+	// 	if entry.EntryType == pb.EntryType_EntryConfChange && entry.Index > r.PendingConfIndex{
+	// 		r.PendingConfIndex = entry.Index
+	// 		break
+	// 	}
+	// }
 
 	// 当删除节点后，Leader 需要重新检查当前的提交，因为当节点被删除后，有的条目已经达到半数，可以选择提交
-	r.updateCommit()
+	if r.State == StateLeader {
+		r.updateCommit()
+	}
 }
 
 func (r *Raft) updateCommit() {

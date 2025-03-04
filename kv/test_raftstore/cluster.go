@@ -432,6 +432,7 @@ func (c *Cluster) MustAddPeer(regionID uint64, peer *metapb.Peer) {
 
 func (c *Cluster) MustRemovePeer(regionID uint64, peer *metapb.Peer) {
 	c.schedulerClient.RemovePeer(regionID, peer)
+	// 检查 peer 是否存在
 	c.MustNonePeer(regionID, peer)
 }
 

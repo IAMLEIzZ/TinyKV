@@ -546,7 +546,7 @@ func (s *Snap) Build(dbSnap *badger.Txn, region *metapb.Region, snapData *rspb.R
 	if err != nil {
 		return err
 	}
-	log.Infof("region %d scan snapshot %s, key count %d, size %d", region.Id, s.Path(), builder.kvCount, builder.size)
+	// log.Infof("region %d scan snapshot %s, key count %d, size %d", region.Id, s.Path(), builder.kvCount, builder.size)
 	err = s.saveCFFiles()
 	if err != nil {
 		return err
