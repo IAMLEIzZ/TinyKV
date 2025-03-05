@@ -413,7 +413,7 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	applyres := &ApplySnapResult{PrevRegion: ps.Region(), Region: snapData.Region}
 	// 将 kvwb 中的修改数据写入 DB 中
 	err := kvWB.WriteToDB(ps.Engines.Kv)
-	fmt.Printf("%v end to apply snapshot, metaDataIndex %v, truncatedStateIndex %v\n", ps.Tag, snapshot.Metadata.Index, ps.applyState.TruncatedState.Index)
+	// fmt.Printf("%v end to apply snapshot, metaDataIndex %v, truncatedStateIndex %v\n", ps.Tag, snapshot.Metadata.Index, ps.applyState.TruncatedState.Index)
 	return applyres, err
 }
 

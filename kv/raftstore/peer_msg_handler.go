@@ -88,6 +88,14 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				if err != nil {
 					log.Panic(ErrResp(err))
 				}
+				if req.Header != nil {
+					epoch := req.Header.RegionEpoch
+					if epoch != nil && util.IsEpochStale(epoch, d.Region().RegionEpoch){
+						resp := ErrResp(&util.ErrEpochNotMatch{})
+						d.processProposal(resp, &en, false)
+						continue
+					}
+				}
 				d.processNormalRequest(req, &en, kvWB)
 			}
 
@@ -313,6 +321,85 @@ func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, en
 		case raft_cmdpb.AdminCmdType_CompactLog:
 			d.processCompactLog(req.AdminRequest, entry, kvWB)
 		case raft_cmdpb.AdminCmdType_Split:
+			// 检查 region 是否对应
+			target_region := req.Header.RegionId
+			if d.regionId != target_region {
+				// regionId不匹配
+				// log.Infof("Split %v Region Not Found\n", target_region)
+				resp := ErrResp(&util.ErrRegionNotFound{RegionId: req.Header.RegionId})
+				d.processProposal(resp, entry, false)
+				return 
+			}
+			split_key := req.AdminRequest.Split.SplitKey
+			err := util.CheckKeyInRegion(split_key, d.Region())
+			if err != nil {
+				resp := ErrResp(err)
+				d.processProposal(resp, entry, false)
+				return
+			}
+			err = util.CheckRegionEpoch(req, d.Region(), true)
+			if err != nil {
+				resp := ErrResp(err)
+				d.processProposal(resp, entry, false)
+				return
+			}
+			if len(req.AdminRequest.Split.NewPeerIds) != len(d.Region().Peers) {
+				resp := ErrResp(&util.ErrStaleCommand{})
+				d.processProposal(resp, entry, false)
+				return 
+			}
+			// 执行分裂操作	
+			// fmt.Printf("begin split region: %v,start_key [%s], end_key:[%s] to split_key:[%s]\n", d.regionId, d.Region().StartKey, d.Region().EndKey, split_key)
+			newpeers := make([]*metapb.Peer, 0)
+			for i, pr := range d.Region().Peers {
+				tmp := &metapb.Peer{
+					Id: req.AdminRequest.Split.NewPeerIds[i],
+					StoreId: pr.StoreId,
+				}
+				newpeers = append(newpeers, tmp)
+			}
+			// region 是一个逻辑上的概念, 在region 中注册要填加的 peer 信息
+			newregion := &metapb.Region{
+				Id: req.AdminRequest.Split.NewRegionId,
+				StartKey: split_key,
+				EndKey: d.Region().EndKey,
+				RegionEpoch: &metapb.RegionEpoch{
+					ConfVer: 0,
+					Version: 0,
+				},
+				Peers: newpeers,
+			}
+
+			newpeer, err := createPeer(d.peer.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newregion)
+			if err != nil {
+				log.Panic(err)
+			}
+			// 路由器注册 newpeer
+			newpeer.peerStorage.SetRegion(newregion)
+			d.ctx.router.register(newpeer)
+
+			// 将 newregion 赋与 newpeer
+			// 修改 old_region 的信息
+			d.ctx.storeMeta.Lock()
+			d.Region().EndKey = split_key
+			d.Region().RegionEpoch.Version ++
+			// newregion.RegionEpoch.Version ++
+			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+			meta.WriteRegionState(kvWB, newregion, rspb.PeerState_Normal)
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newregion})
+			d.ctx.storeMeta.regions[newregion.Id] = newregion
+			d.ctx.storeMeta.Unlock()
+			// 创建实体 newpeer
+			// 启动 newpeer
+			d.ctx.router.send(newpeer.regionId, message.Msg{Type: message.MsgTypeStart, RegionID: newpeer.regionId})
+			resp := d.createAdminResp(raft_cmdpb.AdminCmdType_Split)
+			resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, d.Region())
+			resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, newregion)
+			d.processProposal(resp, entry, false)
+				// 刷新 scheduler 的 region 缓存
+			d.notifyHeartbeatScheduler(d.Region(), d.peer)
+			d.notifyHeartbeatScheduler(newregion, newpeer)
 		}
 		// 管理员请求与普通请求不会在同一个条目中
 		return 
@@ -402,7 +489,7 @@ func (r *peerMsgHandler) createAdminResp(cmdType raft_cmdpb.AdminCmdType) *raft_
 		adminResp.CompactLog = &raft_cmdpb.CompactLogResponse{}
 	case raft_cmdpb.AdminCmdType_Split:
 		adminResp.CmdType = raft_cmdpb.AdminCmdType_Split
-		adminResp.Split = &raft_cmdpb.SplitResponse{}
+		adminResp.Split = &raft_cmdpb.SplitResponse{Regions: make([]*metapb.Region, 0)}
 	case raft_cmdpb.AdminCmdType_TransferLeader:
 		adminResp.CmdType = raft_cmdpb.AdminCmdType_TransferLeader
 		adminResp.TransferLeader = &raft_cmdpb.TransferLeaderResponse{}
@@ -466,7 +553,7 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 
 		if len(key) != 0 {
 			err := util.CheckKeyInRegion(key, d.peerStorage.region)
-			if err != nil {
+			if err != nil  && m.CmdType != raft_cmdpb.CmdType_Snap {
 				cb.Done(ErrResp(err))
 				continue
 			}
@@ -542,15 +629,22 @@ func (d *peerMsgHandler) proposeTransferLeader(msg *raft_cmdpb.RaftCmdRequest, c
 
 // Split 提议
 func (d *peerMsgHandler) proposeSplit(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	split_key := msg.AdminRequest.Split.SplitKey
+	err := util.CheckKeyInRegion(split_key, d.Region())
+	// 如果 split_key 不在当前 region 的 key 范围中，则直接返回错误，并完成 callback
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return 
+	}
 	// split 作为普通的 entry
-	// data, err := msg.Marshal()
-	// if err != nil {
-	// 	log.Panic(ErrResp(err))
-	// }
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic(ErrResp(err))
+	}
 
-	// p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
-	// d.proposals = append(d.proposals, p)
-	// d.RaftGroup.Propose(data)
+	p := &proposal{index: d.peer.nextProposalIndex(), term: d.peer.Term(), cb: cb}
+	d.proposals = append(d.proposals, p)
+	d.RaftGroup.Propose(data)
 }
 
 // 提议管理员请求
@@ -950,12 +1044,14 @@ func (d *peerMsgHandler) onPrepareSplitRegion(regionEpoch *metapb.RegionEpoch, s
 }
 
 func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey []byte) error {
+	// 如果不是 leader 或者 分裂 Key = nil，则检查失败
 	if len(splitKey) == 0 {
 		err := errors.Errorf("%s split key should not be empty", d.Tag)
 		log.Error(err)
 		return err
 	}
 
+	// 只有 Leader 才能发起 Region 分裂
 	if !d.IsLeader() {
 		// region on this store is no longer leader, skipped.
 		log.Infof("%s not leader, skip", d.Tag)
@@ -971,6 +1067,7 @@ func (d *peerMsgHandler) validateSplitRegion(epoch *metapb.RegionEpoch, splitKey
 	// This is a little difference for `check_region_epoch` in region split case.
 	// Here we just need to check `version` because `conf_ver` will be update
 	// to the latest value of the peer, and then send to Scheduler.
+	// 检查 region version
 	if latestEpoch.Version != epoch.Version {
 		log.Infof("%s epoch changed, retry later, prev_epoch: %s, epoch %s",
 			d.Tag, latestEpoch, epoch)

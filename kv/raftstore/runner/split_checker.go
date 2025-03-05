@@ -33,10 +33,12 @@ func NewSplitCheckHandler(engine *badger.DB, router message.RaftRouter, conf *co
 	return runner
 }
 
+// 运行检查器，使用分裂检查器对一个 Region 进行检查，以生成分裂键，并生成分裂管理命令。
 /// run checks a region with split checkers to produce split keys and generates split admin command.
 func (r *splitCheckHandler) Handle(t worker.Task) {
 	spCheckTask, ok := t.(*SplitCheckTask)
 	if !ok {
+		// 检查任务是否是合格的分裂检查任务
 		log.Errorf("unsupported worker.Task: %+v", t)
 		return
 	}
@@ -44,6 +46,7 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 	regionId := region.Id
 	log.Debugf("executing split check worker.Task: [regionId: %d, startKey: %s, endKey: %s]", regionId,
 		hex.EncodeToString(region.StartKey), hex.EncodeToString(region.EndKey))
+	// 分裂检查
 	key := r.splitCheck(regionId, region.StartKey, region.EndKey)
 	if key != nil {
 		_, userKey, err := codec.DecodeBytes(key)
@@ -52,6 +55,7 @@ func (r *splitCheckHandler) Handle(t worker.Task) {
 			// To make sure the keys of same user key locate in one Region, decode and then encode to truncate the timestamp
 			key = codec.EncodeBytes(userKey)
 		}
+		// 分裂检查通过，则对当前 region 进行 split，发送 split 请求至 RaftNode
 		msg := message.Msg{
 			Type:     message.MsgTypeSplitRegion,
 			RegionID: regionId,
@@ -80,8 +84,10 @@ func (r *splitCheckHandler) splitCheck(regionID uint64, startKey, endKey []byte)
 	for it.Seek(startKey); it.Valid(); it.Next() {
 		item := it.Item()
 		key := item.Key()
+		// 如果超出 key 范围，则发送一条 MsgTypeRegionApproximateSize 消息
 		if engine_util.ExceedEndKey(key, endKey) {
 			// update region size
+			// 如果 key 超过 endKey，说明已经超出该 Region 范围，遍历应该停止。
 			r.router.Send(regionID, message.Msg{
 				Type: message.MsgTypeRegionApproximateSize,
 				Data: r.checker.currentSize,
@@ -115,6 +121,7 @@ func (checker *sizeSplitChecker) reset() {
 	checker.splitKey = nil
 }
 
+// 返回当前扫描的 key 是否达到了分裂要求
 func (checker *sizeSplitChecker) onKv(key []byte, item engine_util.DBItem) bool {
 	valueSize := uint64(item.ValueSize())
 	size := uint64(len(key)) + valueSize

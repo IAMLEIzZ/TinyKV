@@ -108,5 +108,6 @@ func ExceedEndKey(current, endKey []byte) bool {
 	if len(endKey) == 0 {
 		return false
 	}
+	// 大于等于 0，则代表 current 超出了 endKey
 	return bytes.Compare(current, endKey) >= 0
 }
