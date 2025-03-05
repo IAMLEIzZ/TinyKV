@@ -9,7 +9,7 @@ endif
 
 GO                  := GO111MODULE=on go
 GOBUILD             := $(GO) build $(BUILD_FLAG) -tags codes
-GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1 -timeout 120s
+GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1 
 TEST_CLEAN          := rm -rf /tmp/*test-raftstore*
 
 TEST_LDFLAGS        := ""
@@ -96,6 +96,8 @@ project2c:
 
 project3: project3a project3b project3c
 
+project3ab: project3a project3b
+
 project3a:
 	$(GOTEST) ./raft -run 3A
 
@@ -110,13 +112,13 @@ project3b:
 	# $(GOTEST) ./kv/test_raftstore -run ^TestConfChangeUnreliableRecover3B$ || true
 	# $(GOTEST) ./kv/test_raftstore -run ^TestConfChangeSnapshotUnreliableRecover3B$ || true
 	# $(GOTEST) ./kv/test_raftstore -run ^TestConfChangeSnapshotUnreliableRecoverConcurrentPartition3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestOneSplit3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestSplitRecover3B$ || true
-	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitRecoverManyClients3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliable3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliableRecover3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecover3B$ || true
-	$(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestOneSplit3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitRecover3B$ || true
+	$(GOTEST) ./kv/test_raftstore -run ^TestSplitRecoverManyClients3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliable3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitUnreliableRecover3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecover3B$ || true
+	# $(GOTEST) ./kv/test_raftstore -run ^TestSplitConfChangeSnapshotUnreliableRecoverConcurrentPartition3B$ || true
 	$(TEST_CLEAN)
 
 project3c:

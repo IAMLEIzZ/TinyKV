@@ -268,6 +268,7 @@ func (d *peerMsgHandler) processProposal(resp *raft_cmdpb.RaftCmdResponse, entry
 func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	// 将请求写入 kvwb 中，后续一次性写入数据库中 MustWriteToDB
 	kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
+	d.peer.SizeDiffHint++ 
 	// fmt.Printf("Leader: %v put exec" + string(req.Put.Cf) + "_" + string(req.Put.Key) + "_" + string(req.Put.Value) + "\n", d.RaftGroup.Raft.Lead)
 	resp := d.createNormalResp(raft_cmdpb.CmdType_Put)
 	resp.Header.CurrentTerm = d.Term()
@@ -279,6 +280,7 @@ func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraft
 func (d *peerMsgHandler) processDelRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	cf, key := req.Delete.Cf, req.Delete.Key
 	kvWB.DeleteCF(cf, key)
+	d.peer.SizeDiffHint--
 	resp := d.createNormalResp(raft_cmdpb.CmdType_Delete)
 	resp.Header.CurrentTerm = d.Term()
 	d.processProposal(resp, entry, false)
@@ -392,6 +394,8 @@ func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, en
 			d.ctx.storeMeta.Unlock()
 			// 创建实体 newpeer
 			// 启动 newpeer
+			d.SizeDiffHint = 0
+			d.ApproximateSize = new(uint64)
 			d.ctx.router.send(newpeer.regionId, message.Msg{Type: message.MsgTypeStart, RegionID: newpeer.regionId})
 			resp := d.createAdminResp(raft_cmdpb.AdminCmdType_Split)
 			resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, d.Region())
