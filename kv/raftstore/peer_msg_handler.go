@@ -315,6 +315,87 @@ func (d *peerMsgHandler) processCompactLog(req *raft_cmdpb.AdminRequest, entry *
 	d.processProposal(resp, entry, false)
 }
 
+// 处理 Split 任务
+func (d *peerMsgHandler) processSplit(req *raft_cmdpb.RaftCmdRequest, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
+	if d.regionId != req.Header.RegionId {
+		// log.Infof("Split %v Region Not Found\n", target_region)
+		resp := ErrResp(&util.ErrRegionNotFound{RegionId: req.Header.RegionId})
+		d.processProposal(resp, entry, false)
+		return 
+	}
+	split_key := req.AdminRequest.Split.SplitKey
+	err := util.CheckKeyInRegion(split_key, d.Region())
+	if err != nil {
+		resp := ErrResp(err)
+		d.processProposal(resp, entry, false)
+		return
+	}
+	err = util.CheckRegionEpoch(req, d.Region(), true)
+		if err != nil {
+			resp := ErrResp(err)
+			d.processProposal(resp, entry, false)
+			return
+		}
+	if len(req.AdminRequest.Split.NewPeerIds) != len(d.Region().Peers) {
+		resp := ErrResp(&util.ErrStaleCommand{})
+		d.processProposal(resp, entry, false)
+		return 
+	}
+	// 执行分裂操作	
+	// fmt.Printf("begin split region: %v,start_key [%s], end_key:[%s] to split_key:[%s]\n", d.regionId, d.Region().StartKey, d.Region().EndKey, split_key)
+	newpeers := make([]*metapb.Peer, 0)
+	for i, pr := range d.Region().Peers {
+		tmp := &metapb.Peer{
+			Id: req.AdminRequest.Split.NewPeerIds[i],
+			StoreId: pr.StoreId,
+		}
+		newpeers = append(newpeers, tmp)
+	}
+	// region 是一个逻辑上的概念, 在region 中注册要填加的 peer 信息
+	newregion := &metapb.Region{
+		Id: req.AdminRequest.Split.NewRegionId,
+		StartKey: split_key,
+		EndKey: d.Region().EndKey,
+		RegionEpoch: &metapb.RegionEpoch{
+			ConfVer: 0,
+			Version: 0,
+		},
+		Peers: newpeers,
+	}
+	// 创建新 peer
+	newpeer, err := createPeer(d.peer.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newregion)
+	if err != nil {
+		log.Panic(err)
+	}
+	// 路由器注册 newpeer
+	newpeer.peerStorage.SetRegion(newregion)
+	d.ctx.router.register(newpeer)
+	// 将 newregion 赋与 newpeer
+	// 修改 old_region 的信息
+	d.ctx.storeMeta.Lock()
+	d.Region().EndKey = split_key
+	d.Region().RegionEpoch.Version ++
+	// newregion.RegionEpoch.Version ++
+	meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+	meta.WriteRegionState(kvWB, newregion, rspb.PeerState_Normal)
+	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+	d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newregion})
+	d.ctx.storeMeta.regions[newregion.Id] = newregion
+	d.ctx.storeMeta.Unlock()
+	// 创建实体 newpeer
+	// 启动 newpeer
+	d.SizeDiffHint = 0
+	d.ApproximateSize = new(uint64)
+	d.ctx.router.send(newpeer.regionId, message.Msg{Type: message.MsgTypeStart, RegionID: newpeer.regionId})
+	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_Split)
+	resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, d.Region())
+	resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, newregion)
+	d.processProposal(resp, entry, false)
+	// 刷新 scheduler 的 region 缓存
+	d.notifyHeartbeatScheduler(d.Region(), d.peer)
+	d.notifyHeartbeatScheduler(newregion, newpeer)
+}
+
 // 处理 normal request
 func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	// 处理管理员普通请求（split, compact）
@@ -324,86 +405,7 @@ func (d *peerMsgHandler) processNormalRequest(req *raft_cmdpb.RaftCmdRequest, en
 			d.processCompactLog(req.AdminRequest, entry, kvWB)
 		case raft_cmdpb.AdminCmdType_Split:
 			// 检查 region 是否对应
-			target_region := req.Header.RegionId
-			if d.regionId != target_region {
-				// regionId不匹配
-				// log.Infof("Split %v Region Not Found\n", target_region)
-				resp := ErrResp(&util.ErrRegionNotFound{RegionId: req.Header.RegionId})
-				d.processProposal(resp, entry, false)
-				return 
-			}
-			split_key := req.AdminRequest.Split.SplitKey
-			err := util.CheckKeyInRegion(split_key, d.Region())
-			if err != nil {
-				resp := ErrResp(err)
-				d.processProposal(resp, entry, false)
-				return
-			}
-			err = util.CheckRegionEpoch(req, d.Region(), true)
-			if err != nil {
-				resp := ErrResp(err)
-				d.processProposal(resp, entry, false)
-				return
-			}
-			if len(req.AdminRequest.Split.NewPeerIds) != len(d.Region().Peers) {
-				resp := ErrResp(&util.ErrStaleCommand{})
-				d.processProposal(resp, entry, false)
-				return 
-			}
-			// 执行分裂操作	
-			// fmt.Printf("begin split region: %v,start_key [%s], end_key:[%s] to split_key:[%s]\n", d.regionId, d.Region().StartKey, d.Region().EndKey, split_key)
-			newpeers := make([]*metapb.Peer, 0)
-			for i, pr := range d.Region().Peers {
-				tmp := &metapb.Peer{
-					Id: req.AdminRequest.Split.NewPeerIds[i],
-					StoreId: pr.StoreId,
-				}
-				newpeers = append(newpeers, tmp)
-			}
-			// region 是一个逻辑上的概念, 在region 中注册要填加的 peer 信息
-			newregion := &metapb.Region{
-				Id: req.AdminRequest.Split.NewRegionId,
-				StartKey: split_key,
-				EndKey: d.Region().EndKey,
-				RegionEpoch: &metapb.RegionEpoch{
-					ConfVer: 0,
-					Version: 0,
-				},
-				Peers: newpeers,
-			}
-
-			newpeer, err := createPeer(d.peer.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newregion)
-			if err != nil {
-				log.Panic(err)
-			}
-			// 路由器注册 newpeer
-			newpeer.peerStorage.SetRegion(newregion)
-			d.ctx.router.register(newpeer)
-
-			// 将 newregion 赋与 newpeer
-			// 修改 old_region 的信息
-			d.ctx.storeMeta.Lock()
-			d.Region().EndKey = split_key
-			d.Region().RegionEpoch.Version ++
-			// newregion.RegionEpoch.Version ++
-			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
-			meta.WriteRegionState(kvWB, newregion, rspb.PeerState_Normal)
-			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
-			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: newregion})
-			d.ctx.storeMeta.regions[newregion.Id] = newregion
-			d.ctx.storeMeta.Unlock()
-			// 创建实体 newpeer
-			// 启动 newpeer
-			d.SizeDiffHint = 0
-			d.ApproximateSize = new(uint64)
-			d.ctx.router.send(newpeer.regionId, message.Msg{Type: message.MsgTypeStart, RegionID: newpeer.regionId})
-			resp := d.createAdminResp(raft_cmdpb.AdminCmdType_Split)
-			resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, d.Region())
-			resp.AdminResponse.Split.Regions = append(resp.AdminResponse.Split.Regions, newregion)
-			d.processProposal(resp, entry, false)
-				// 刷新 scheduler 的 region 缓存
-			d.notifyHeartbeatScheduler(d.Region(), d.peer)
-			d.notifyHeartbeatScheduler(newregion, newpeer)
+			d.processSplit(req, entry, kvWB)
 		}
 		// 管理员请求与普通请求不会在同一个条目中
 		return 
