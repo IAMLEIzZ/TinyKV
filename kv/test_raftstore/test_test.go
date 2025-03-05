@@ -309,7 +309,7 @@ func GenericTest(t *testing.T, part string, nclients int, unreliable bool, crash
 					truncatedIdx := state.TruncatedState.Index
 					appliedIdx := state.AppliedIndex
 					if appliedIdx-truncatedIdx > 2*uint64(maxraftlog) {
-						t.Fatalf("logs were not trimmed (%v - %v > 2*%v)", appliedIdx, truncatedIdx, maxraftlog)
+						t.Fatalf("[region]:%v logs were not trimmed (%v - %v > 2*%v)", region.Id, appliedIdx, truncatedIdx, maxraftlog)
 					}
 				}
 

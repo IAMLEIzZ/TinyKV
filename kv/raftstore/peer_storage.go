@@ -391,7 +391,12 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	ps.applyState.TruncatedState.Term = snapshot.Metadata.Term
 	ps.snapState.StateType = snap.SnapState_Applying
 	// 将 applystate 写入 kvwb 中，Raftstate 会在 saveReadyState 中 raftWB 中
-	kvWB.SetMeta(meta.ApplyStateKey(ps.region.Id), ps.applyState)
+	kvWB.SetMeta(meta.ApplyStateKey(snapData.GetRegion().GetId()), ps.applyState)
+
+	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
+	raftWB.SetMeta(meta.RaftStateKey(snapData.GetRegion().GetId()), ps.raftState)
+	
+
 	// 任务完成通知通道
 	finished := make(chan bool, 1)
 	// 将 k-v 数据写入 kvdb 和 raftdb (install snapshot)，使用已经写好的 applytask 即可
@@ -405,10 +410,10 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 
 	<-finished
 
-	applyres := &ApplySnapResult{PrevRegion: ps.region, Region: snapData.Region}
+	applyres := &ApplySnapResult{PrevRegion: ps.Region(), Region: snapData.Region}
 	// 将 kvwb 中的修改数据写入 DB 中
-	meta.WriteRegionState(kvWB, snapData.Region, rspb.PeerState_Normal)
 	err := kvWB.WriteToDB(ps.Engines.Kv)
+	fmt.Printf("%v end to apply snapshot, metaDataIndex %v, truncatedStateIndex %v\n", ps.Tag, snapshot.Metadata.Index, ps.applyState.TruncatedState.Index)
 	return applyres, err
 }
 

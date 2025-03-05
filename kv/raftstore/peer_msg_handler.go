@@ -69,7 +69,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		}
 
 		// 发送消息（处理 message）
-		d.Send(d.ctx.trans, ready.Messages)
+		if len(ready.Messages) != 0 {
+			d.Send(d.ctx.trans, ready.Messages)
+		}
+
 		// 处理需要 apply 的消息 （处理 commitedEntry）
 		for _, en := range ready.CommittedEntries {
 			d.peerStorage.applyState.AppliedIndex = en.Index
@@ -87,12 +90,23 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				}
 				d.processNormalRequest(req, &en, kvWB)
 			}
+
 			if d.stopped {
 				return
 			}		
+
 			// 向 kv 数据库中写入
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)	
 			kvWB.MustWriteToDB(d.peerStorage.Engines.Kv)
+			// fmt.Printf("Set [region]:%v appliedIndex to %v\n", d.peer.PeerId(), en.Index)
+			engines := d.peerStorage.Engines
+			txn := engines.Kv.NewTransaction(false)
+			regionId := d.peerStorage.Region().GetId()
+			regionState := new(rspb.RegionLocalState)
+			err := engine_util.GetMetaFromTxn(txn, meta.RegionStateKey(regionId), regionState)
+			if err != nil {
+				log.Panic(err)
+			}
 		}
 		d.RaftGroup.Advance(ready)
 	}
@@ -102,7 +116,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 func (d *peerMsgHandler) checkNodeExist(id uint64) (bool, int) {
 	for i, pr := range d.peer.peerStorage.region.Peers {
 		if pr.Id == id {
-			// 节点已存在，添加节点失败
 			// log.Infof("Node: %d 存在", id)
 			return true, i
 		}
@@ -112,8 +125,61 @@ func (d *peerMsgHandler) checkNodeExist(id uint64) (bool, int) {
 }
 
 // AddNode
-func (d *peerMsgHandler) processAddNode() {
-	
+func (d *peerMsgHandler) processAddNode(req *raft_cmdpb.RaftCmdRequest, cc eraftpb.ConfChange, kvWB *engine_util.WriteBatch, en *eraftpb.Entry) {
+	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_ChangePeer)
+	resp.AdminResponse.ChangePeer.Region = d.Region()
+	peer := req.AdminRequest.ChangePeer.Peer
+	exist, _ := d.checkNodeExist(peer.Id)
+	d.RaftGroup.ApplyConfChange(cc)
+	if exist {
+		// 已经存在
+		log.Infof("Node: %d already exist", peer.Id)
+	} else {
+		d.ctx.storeMeta.Lock()
+		d.Region().RegionEpoch.ConfVer ++
+		newPeer := &metapb.Peer{
+			Id: cc.NodeId,
+			StoreId: peer.StoreId,
+		}
+		d.peer.insertPeerCache(newPeer)	
+		d.Region().Peers = append(d.Region().Peers, newPeer)
+		meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+		d.ctx.storeMeta.Unlock()
+	}
+	d.processProposal(resp, en, false)
+	d.notifyHeartbeatScheduler(d.Region(),d.peer)
+}
+
+// RemoveNode
+func (d *peerMsgHandler) processRemoveNode(req *raft_cmdpb.RaftCmdRequest, cc eraftpb.ConfChange, kvWB *engine_util.WriteBatch, en *eraftpb.Entry) {
+	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_ChangePeer)
+	resp.AdminResponse.ChangePeer.Region = d.Region()
+	peer := req.AdminRequest.ChangePeer.Peer
+	exist, idx := d.checkNodeExist(peer.Id)
+	d.RaftGroup.ApplyConfChange(cc)
+	if !exist {
+		log.Infof("Node: %d Not Exist", peer.Id)
+		return
+	}
+
+	if d.PeerId() == peer.Id {
+		kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId))
+		d.destroyPeer()
+		return 
+	} else {
+		d.ctx.storeMeta.Lock()
+		d.Region().RegionEpoch.ConfVer ++
+		// 移除 peer
+		d.Region().Peers[idx] = d.Region().Peers[len(d.Region().Peers) - 1]
+		d.Region().Peers = d.Region().Peers[:len(d.Region().Peers) - 1]
+		meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+		d.peer.removePeerCache(peer.Id)
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+		d.ctx.storeMeta.Unlock()
+	}
+	d.processProposal(resp, en, false)
+	d.notifyHeartbeatScheduler(d.Region(),d.peer)
 }
 
 // 处理 peer 变更请求
@@ -139,64 +205,12 @@ func (d *peerMsgHandler) processConfChange(entry *eraftpb.Entry, kvWB *engine_ut
 			return
 		}
 	}
-	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_ChangePeer)
-	resp.AdminResponse.ChangePeer.Region = d.Region()
-	peer := req.AdminRequest.ChangePeer.Peer
-	changetype := cc.ChangeType
-	peerId := peer.Id
-	d_region := d.Region()
-	if changetype == eraftpb.ConfChangeType_AddNode {
-		d.RaftGroup.ApplyConfChange(cc)
-		// AddNode
-		f, _ := d.checkNodeExist(peerId)
-		if f {
-			log.Infof("Node: %d 已经存在", peerId)
-		} else {
-			// fmt.Printf("Node:%d 处理 changepeer 请求, type 是 AddNode, 处理节点是 %d\n", d.peer.Meta.Id, peer.Id)
-			d.ctx.storeMeta.Lock()
-			d_region.RegionEpoch.ConfVer ++
-			newPeer := &metapb.Peer{
-				Id: cc.NodeId,
-				StoreId: peer.StoreId,
-			}
-			d.peer.insertPeerCache(newPeer)	
-			d_region.Peers = append(d_region.Peers, newPeer)
-			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
-			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
-			d.ctx.storeMeta.Unlock()
-		}
-		d.processProposal(resp, entry, false)
-		d.notifyHeartbeatScheduler(d.Region(),d.peer)
-	} else {
-		d.RaftGroup.ApplyConfChange(cc)
-		// RemoveNode
-		// 在 Region 的 peer 列表中删除 peer
-		f, idx := d.checkNodeExist(peerId)
-		if !f {
-			log.Infof("Node: %d 不存在", peerId)
-			d.processProposal(resp, entry, false)
-			return 
-		}
-		// fmt.Printf("Node:%d 处理 changepeer 请求, type 是 DeleteNode, 处理节点是 %d\n", d.peer.Meta.Id, peer.Id)
-		// 如果此时正好是要被删除的节点，则销毁节点
-		if d.PeerId() == peerId {
-			kvWB.DeleteMeta(meta.ApplyStateKey(d.regionId))
-			d.destroyPeer()
-			return 
-		} else if f {
-			// 配置版本递增
-			d.ctx.storeMeta.Lock()
-			d_region.RegionEpoch.ConfVer ++
-			// 移除 peer
-			d_region.Peers[idx] = d_region.Peers[len(d_region.Peers) - 1]
-			d_region.Peers = d_region.Peers[:len(d_region.Peers) - 1]
-			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
-			d.peer.removePeerCache(peerId)
-			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
-			d.ctx.storeMeta.Unlock()
-		}
-		d.processProposal(resp, entry, false)
-		d.notifyHeartbeatScheduler(d.Region(),d.peer)
+
+	switch cc.ChangeType {
+	case eraftpb.ConfChangeType_AddNode:
+		d.processAddNode(req, cc, kvWB, entry)
+	case eraftpb.ConfChangeType_RemoveNode:
+		d.processRemoveNode(req, cc, kvWB, entry)
 	}
 }
 
@@ -246,7 +260,7 @@ func (d *peerMsgHandler) processProposal(resp *raft_cmdpb.RaftCmdResponse, entry
 func (d *peerMsgHandler) processPutRequest(req *raft_cmdpb.Request, entry *eraftpb.Entry, kvWB *engine_util.WriteBatch) {
 	// 将请求写入 kvwb 中，后续一次性写入数据库中 MustWriteToDB
 	kvWB.SetCF(req.Put.Cf, req.Put.Key, req.Put.Value)
-	// println("put exec" + string(req.Put.Cf) + "_" + string(req.Put.Key) + "_" + string(req.Put.Value))
+	// fmt.Printf("Leader: %v put exec" + string(req.Put.Cf) + "_" + string(req.Put.Key) + "_" + string(req.Put.Value) + "\n", d.RaftGroup.Raft.Lead)
 	resp := d.createNormalResp(raft_cmdpb.CmdType_Put)
 	resp.Header.CurrentTerm = d.Term()
 	// 处理 proposal 中的函数回调
@@ -285,6 +299,7 @@ func (d *peerMsgHandler) processCompactLog(req *raft_cmdpb.AdminRequest, entry *
 		d.peerStorage.applyState.TruncatedState.Index, d.peerStorage.applyState.TruncatedState.Term = req.CompactLog.CompactIndex, req.CompactLog.CompactTerm
 		kvWB.SetMeta(meta.ApplyStateKey(d.Region().GetId()), d.peerStorage.applyState)
 		d.ScheduleCompactLog(req.CompactLog.CompactIndex)
+		// fmt.Printf("%d apply commit, entry %v, type %s, truncatedIndex %v, appliedIndex %v\n", d.peer.PeerId(), entry.Index, req.CmdType, req.CompactLog.CompactIndex, d.peerStorage.applyState.AppliedIndex)
 	}
 	resp := d.createAdminResp(raft_cmdpb.AdminCmdType_CompactLog)
 	d.processProposal(resp, entry, false)
@@ -346,26 +361,32 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 
 // 构建普通请求响应
 func (r *peerMsgHandler) createNormalResp(cmdType raft_cmdpb.CmdType) *raft_cmdpb.RaftCmdResponse {
-	response := &raft_cmdpb.Response{}
-	switch cmdType {
-	case raft_cmdpb.CmdType_Get:
-		response.CmdType = raft_cmdpb.CmdType_Get
-		response.Get = &raft_cmdpb.GetResponse{}
-	case raft_cmdpb.CmdType_Put:
-		response.CmdType = raft_cmdpb.CmdType_Put
-		response.Put = &raft_cmdpb.PutResponse{}
-	case raft_cmdpb.CmdType_Delete:
-		response.CmdType = raft_cmdpb.CmdType_Delete
-		response.Delete = &raft_cmdpb.DeleteResponse{}
-	case raft_cmdpb.CmdType_Snap:
-		response.CmdType = raft_cmdpb.CmdType_Snap
-		response.Snap = &raft_cmdpb.SnapResponse{}
-	}
 	resp := &raft_cmdpb.RaftCmdResponse{
 		Header:    &raft_cmdpb.RaftResponseHeader{},
 		Responses: make([]*raft_cmdpb.Response, 0),
 	}
-	resp.Responses = append(resp.Responses, response)
+	switch cmdType {
+	case raft_cmdpb.CmdType_Get:
+		resp.Responses = []*raft_cmdpb.Response{{
+			CmdType: raft_cmdpb.CmdType_Get,
+			Get: &raft_cmdpb.GetResponse{},
+		}}
+	case raft_cmdpb.CmdType_Put:
+		resp.Responses = []*raft_cmdpb.Response{{
+			CmdType: raft_cmdpb.CmdType_Put,
+			Put: &raft_cmdpb.PutResponse{},
+		}}
+	case raft_cmdpb.CmdType_Delete:
+		resp.Responses = []*raft_cmdpb.Response{{
+			CmdType: raft_cmdpb.CmdType_Delete,
+			Delete: &raft_cmdpb.DeleteResponse{},
+		}}
+	case raft_cmdpb.CmdType_Snap:
+		resp.Responses = []*raft_cmdpb.Response{{
+			CmdType: raft_cmdpb.CmdType_Snap,
+			Snap: &raft_cmdpb.SnapResponse{},
+		}}
+	}
 	return resp
 }
 
@@ -461,8 +482,25 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 	}
 }
 
+func (d *peerMsgHandler) checkRemoveNode(id uint64) bool{
+	if d.LeaderId() == id && len(d.peer.RaftGroup.Raft.Prs) == 2 {
+		return false
+	}
+	return true
+}
+
 // ChangePeer 提议
 func (d *peerMsgHandler) proposeChangePeer(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	// 这里判断如果 d是 leader 并且只有两个节点在集群中，则拒绝此次提议并且提议一个 leadertransfer
+	if msg.AdminRequest.ChangePeer.ChangeType == eraftpb.ConfChangeType_RemoveNode && !d.checkRemoveNode(msg.AdminRequest.ChangePeer.Peer.Id){
+		cb.Done(ErrResp(&util.ErrStaleCommand{}))
+		for k := range d.peer.RaftGroup.Raft.Prs {
+			if k != msg.AdminRequest.ChangePeer.Peer.Id {
+				d.RaftGroup.TransferLeader(k)
+				return 
+			}
+		}
+	}
 	data, err := msg.Marshal()
 	if err != nil {
 		log.Panic("changepeer marshal err")

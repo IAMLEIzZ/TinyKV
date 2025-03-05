@@ -243,6 +243,9 @@ func (r *Raft) sendHeartbeat(to uint64) {
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
+	if _, ok := r.Prs[r.id]; !ok {
+		return
+	}
 	// Your Code Here (2A).
 	// 对于 follower 和 candidate 和 leader 要处理的 tick 是不同的
 	switch r.State {
@@ -311,7 +314,7 @@ func (r *Raft) canbeLeader() bool {
 			vote_num++
 		}
 	}
-	return vote_num > len(r.votes)/2
+	return vote_num > len(r.votes) / 2
 }
 
 // becomeFollower transform this peer's state to Follower
@@ -492,16 +495,14 @@ func (r *Raft) stepLeader(m pb.Message) {
 	}
 }
 
+// func (r *Raft) sendMsgHup(to uint64) {
+// 	msg := pb.Message{
+// 		MsgType: pb.MessageType_MsgHup,
+// 		To: to,
+// 	}
 
-func (r *Raft) sendMsgHup(to uint64) {
-	msg := pb.Message{
-		MsgType: pb.MessageType_MsgHup,
-		To: to,
-	}
-
-	r.msgs = append(r.msgs, msg)
-}
-
+// 	r.msgs = append(r.msgs, msg)
+// }
 
 // handleTransferLeader Leader 转让领导权
 func (r *Raft) handleTransferLeader(m pb.Message) {
@@ -572,6 +573,7 @@ func (r *Raft) sendAppend(to uint64) {
 	// 对应成员的目前日志复制进度，next 是成员希望收到的，-1 代表已经匹配到的 idx
 	prev_idx := r.Prs[to].Next - 1
 	// 获取已经匹配到的日志的 Term
+	// prev_term, _ := r.RaftLog.Term(prev_idx)
 	prev_term, err := r.RaftLog.Term(prev_idx)
 	// 根据索引获取日志，要发送多条日志一次,期待收到的消息索引 - 起始索引 = 位置
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
@@ -632,11 +634,6 @@ func (r *Raft) appendEntry(m pb.Message) {
 		r.RaftLog.entries = append(r.RaftLog.entries, *mes)
 		r.Prs[r.id].Next = mes.Index + 1
 		r.Prs[r.id].Match = r.Prs[r.id].Next - 1
-		// if mes.EntryType == pb.EntryType_EntryConfChange {
-		// 	if r.PendingConfIndex <= r.RaftLog.applied {
-		// 		r.PendingConfIndex = mes.Index
-		// 	}
-		// }
 		li++
 	}
 
@@ -669,23 +666,20 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	if r.State == StateFollower || r.State == StateCandidate {
 		return
 	}
-
 	if _, exist := r.Prs[m.From]; !exist {
 		log.Infof("节点 %d 已经不存在", m.From)
 		return 
 	}
-
-	log.Infof("成功接收到来自 %d 的 Append 回应", m.From)
-
-	if m.Index > r.Prs[m.From].Match && m.GetReject() {
-		r.Prs[m.From].Match = m.Index
-		r.Prs[m.From].Next = m.Index + 1
-		return
-	}
+	// log.Infof("成功接收到来自 %d 的 Append 回应", m.From)
+	// if m.Index > r.Prs[m.From].Match && m.GetReject() {
+	// 	r.Prs[m.From].Match = m.Index
+	// 	r.Prs[m.From].Next = m.Index + 1
+	// 	return
+	// }
 	// 如果拒绝，则会缩小对应的 prs
 	from := m.GetFrom()
 	if m.GetReject() {
-		r.Prs[m.From].Next = min(m.Index+1, r.Prs[m.From].Next-1)
+		r.Prs[m.From].Next = min(m.Index + 1, r.Prs[m.From].Next-1)
 		r.sendAppend(m.From)
 		return
 	}
@@ -693,14 +687,13 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	follower_match_idx := m.GetIndex()
 	follower_id := from
 	r.Prs[follower_id].Next = follower_match_idx + 1
-	r.Prs[follower_id].Match = r.Prs[follower_id].Next - 1
+	r.Prs[follower_id].Match = follower_match_idx
 	// 统计 commit 日志消息，遍历 r.prs，找到最小的match，然后更新
 	r.updateCommit()
 
 	if r.leadTransferee == m.From && r.Lead != r.leadTransferee && follower_match_idx == r.RaftLog.LastIndex() {
 		// 转入处理请求
 		r.sendTransferMsg(m.From)
-		return
 	}
 }
 
@@ -825,24 +818,22 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	// 拒绝 term 小的请求
 	if m.Term < r.Term {
 		return
-	}
-
-	if r.Term <= m.Term {
+	} else {
 		r.electionElapsed = 0
 		r.becomeFollower(m.Term, m.From)
 	}
-
+	
 	msg_prev_index, msg_prev_term := m.Index, m.LogTerm
 	// 当前 msg 的前序日志与 raft 节点的日志有 gap
 	if msg_prev_index > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex() + 1, true)
 		return
 	}
 
 	term, err := r.RaftLog.Term(msg_prev_index)
 	if term != msg_prev_term && err == nil {
 		// 虽然日志的 index 匹配一致了，但是与term 匹配不一致，则拒绝添加日志
-		r.sendAppendResponse(m.From, r.RaftLog.LastIndex(), true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex() + 1, true)
 		return
 	}
 	// prev_index 和 prev_term 都对上了，允许添加日志
@@ -856,7 +847,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if en_idx-r.RaftLog.FirstIndex() > uint64(len(r.RaftLog.entries)) || en_idx > r.RaftLog.LastIndex() {
 			// 追加
 			r.RaftLog.entries = append(r.RaftLog.entries, *en)
-		} else if old_term != en.Term {
+		} else if old_term != en.Term || err != nil{
 			// 不是同一条日志，需要覆盖
 			if en_idx < r.RaftLog.FirstIndex() {
 				r.RaftLog.entries = make([]pb.Entry, 0)
@@ -881,20 +872,20 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	// 处理心跳
-	m_term := m.GetTerm()
-	if r.Term > m_term {
+	if r.Term > m.Term {
+		// 只有严格大于当前任期时，才会降级
 		return
 	}
 	m_from := m.GetFrom()
 	// 退化为 follower，并重置选举时间
 	r.electionElapsed = 0
-	r.becomeFollower(m_term, m_from)
+	r.becomeFollower(m.Term, m_from)
 	// 处理心跳，append 日志
 	// MessageType_MsgAppend
 	msg := pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		From:    r.id,
-		To:      m_from,
+		To:      m.From,
 	}
 	r.msgs = append(r.msgs, msg)
 }
@@ -909,11 +900,11 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 			r.becomeFollower(r.Term, None)
 		}
 	}
-	if m.Term < r.Term {
+
+	if r.Term > m.Term {
 		return
 	}
-
-	r.becomeFollower(r.Term, m.From)
+	
 
 	metaData := m.Snapshot.Metadata
 	shotIndex := metaData.Index
@@ -921,7 +912,12 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	shotConf := metaData.ConfState
 
 	if shotIndex < r.RaftLog.committed || shotIndex < r.RaftLog.FirstIndex() {
+		r.sendAppendResponse(m.From, r.RaftLog.committed, false)
 		return
+	}
+
+	if r.Lead != m.From {
+		r.Lead = m .From
 	}
 
 	// 丢弃之前的所有 entry
