@@ -14,6 +14,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"path"
@@ -276,10 +277,66 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 	return nil
 }
 
+func (c *RaftCluster) checkHaveRegion(id uint64) (bool, int) {
+	cluster_region_info := c.core.Regions.GetRegions()
+	for i := range cluster_region_info {
+		rg := cluster_region_info[i]
+		if rg.GetID() == id {
+			return true, i
+		}
+	}
+	return false, -1
+}
+
+func (c *RaftCluster) checkOverlappingRegion(startKey, endKey []byte) (overlappingIdx []int) {
+	cluster_region_info := c.core.Regions.GetRegions()
+	for i := range cluster_region_info {
+		rg := cluster_region_info[i]
+		// 检查 startKey 和 endKey 是否有重叠，有的话返回所有重叠的 idx
+		rg_startKey, rg_endKey := rg.GetStartKey(), rg.GetEndKey()
+		if len(endKey) == 0 || len(rg_endKey) == 0 || (bytes.Compare(startKey, rg_endKey) < 0 && bytes.Compare(rg_startKey, endKey) < 0) {
+			overlappingIdx = append(overlappingIdx, i)
+		}
+	}
+	return overlappingIdx
+}
+
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
-
+	// region 是 read-only 的
+	new_region_epoch := region.GetMeta().RegionEpoch
+	cluster_region_info := c.core.Regions.GetRegions()
+	f, idx := c.checkHaveRegion(region.GetID())
+	if f {
+		// 如果存在，进行下一步检查
+		old_epoch := cluster_region_info[idx].GetRegionEpoch()
+		if old_epoch.ConfVer < new_region_epoch.ConfVer && old_epoch.Version < new_region_epoch.Version {
+			// 更新
+			c.core.PutRegion(region)
+			c.updateStoreStatusLocked(region.GetID())
+			return nil
+		} else {
+			return nil
+		}
+	}
+	// 检查所有重叠的 region，如果 心跳region 的 epoch 大于所有的重叠 region，则更新，否则不更新
+	ids := c.checkOverlappingRegion(region.GetStartKey(), region.GetEndKey())
+	if len(ids) == 0 {
+		c.core.PutRegion(region)
+		c.updateStoreStatusLocked(region.GetID())
+		return nil
+	} else {
+		for i := range ids {
+			overlap_epoch := cluster_region_info[i].GetRegionEpoch()
+			if overlap_epoch.ConfVer < new_region_epoch.ConfVer && overlap_epoch.Version < new_region_epoch.Version {
+			// 更新
+				c.core.PutRegion(region)
+				c.updateStoreStatusLocked(region.GetID())
+				return nil
+			}
+		}
+	}
 	return nil
 }
 
