@@ -965,7 +965,7 @@ func (r *Raft) addNode(id uint64) {
 	_, exist := r.Prs[id]
 	if exist {
 		// 节点已经存在
-		println("节点已经存在")
+		// println("节点已经存在")
 		return 
 	}
 	// if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {

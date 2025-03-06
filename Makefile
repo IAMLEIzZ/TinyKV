@@ -96,8 +96,6 @@ project2c:
 
 project3: project3a project3b project3c
 
-project3ab: project3a project3b
-
 project3a:
 	$(GOTEST) ./raft -run 3A
 
