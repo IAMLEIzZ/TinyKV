@@ -277,17 +277,6 @@ func (c *RaftCluster) handleStoreHeartbeat(stats *schedulerpb.StoreStats) error 
 	return nil
 }
 
-func (c *RaftCluster) checkHaveRegion(id uint64) (bool, int) {
-	cluster_region_info := c.core.Regions.GetRegions()
-	for i := range cluster_region_info {
-		rg := cluster_region_info[i]
-		if rg.GetID() == id {
-			return true, i
-		}
-	}
-	return false, -1
-}
-
 func (c *RaftCluster) checkOverlappingRegion(startKey, endKey []byte) (overlappingIdx []int) {
 	cluster_region_info := c.core.Regions.GetRegions()
 	for i := range cluster_region_info {
@@ -304,38 +293,28 @@ func (c *RaftCluster) checkOverlappingRegion(startKey, endKey []byte) (overlappi
 // processRegionHeartbeat updates the region information.
 func (c *RaftCluster) processRegionHeartbeat(region *core.RegionInfo) error {
 	// Your Code Here (3C).
+	if region.GetRegionEpoch() == nil {
+		return errors.Errorf("Invild Region Heartbeat")
+	}
 	// region 是 read-only 的
-	new_region_epoch := region.GetMeta().RegionEpoch
-	cluster_region_info := c.core.Regions.GetRegions()
-	f, idx := c.checkHaveRegion(region.GetID())
-	if f {
-		// 如果存在，进行下一步检查
-		old_epoch := cluster_region_info[idx].GetRegionEpoch()
-		if old_epoch.ConfVer < new_region_epoch.ConfVer && old_epoch.Version < new_region_epoch.Version {
-			// 更新
-			c.core.PutRegion(region)
-			c.updateStoreStatusLocked(region.GetID())
-			return nil
-		} else {
-			return nil
+	old_region := c.GetRegion(region.GetID())
+	if old_region != nil {
+		// 存在旧的 region
+		if region.GetRegionEpoch().ConfVer < old_region.GetRegionEpoch().ConfVer || region.GetRegionEpoch().Version < old_region.GetRegionEpoch().Version {
+			return errors.Errorf("stale command")
+		}
+	} 
+	// 检查所有重叠的 region，如果 心跳region 的 epoch 大于所有的重叠 region，则更新，否则不更新
+	overlap_regions := c.ScanRegions(region.GetStartKey(), region.GetEndKey(), -1)
+	for i := range overlap_regions {
+		overlap_region_epoch := overlap_regions[i].GetRegionEpoch()
+		if region.GetRegionEpoch().ConfVer < overlap_region_epoch.ConfVer || region.GetRegionEpoch().Version < overlap_region_epoch.Version {
+			return errors.Errorf("stale command")
 		}
 	}
-	// 检查所有重叠的 region，如果 心跳region 的 epoch 大于所有的重叠 region，则更新，否则不更新
-	ids := c.checkOverlappingRegion(region.GetStartKey(), region.GetEndKey())
-	if len(ids) == 0 {
-		c.core.PutRegion(region)
-		c.updateStoreStatusLocked(region.GetID())
-		return nil
-	} else {
-		for i := range ids {
-			overlap_epoch := cluster_region_info[i].GetRegionEpoch()
-			if overlap_epoch.ConfVer < new_region_epoch.ConfVer && overlap_epoch.Version < new_region_epoch.Version {
-			// 更新
-				c.core.PutRegion(region)
-				c.updateStoreStatusLocked(region.GetID())
-				return nil
-			}
-		}
+	c.core.PutRegion(region)
+	for i := range region.GetStoreIds() {
+		c.updateStoreStatusLocked(i)
 	}
 	return nil
 }

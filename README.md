@@ -17,12 +17,13 @@
 - 2C 添加 Raft 日志垃圾回收和快照支持 ✅
 - ![alt text](images/image_part2C.png)
 
-## PartC (Multi-Raft KV)
+## PartC (Multi-Raft KV) ✅
 
 - 在 Raft 算法中实现成员变更和领导者变更 ✅
 - ![alt text](images/image_part3A.png)
-- 在 Raft 存储上实现配置变更和 Region 分裂
-- 实现一个基础的调度器
+- 在 Raft 存储上实现配置变更和 Region 分裂 ✅
+- 实现一个基础的调度器 ✅
+- ![alt text](images/image_part3C.png)
 
 ## PartD (Transaction)
 

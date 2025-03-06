@@ -67,6 +67,7 @@ func (s *baseScheduler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "not implements")
 }
 
+// 返回调度器调度的最小间隔，在调度器收到间隔后，定期运行 Schedule
 func (s *baseScheduler) GetMinInterval() time.Duration {
 	return MinScheduleInterval
 }
