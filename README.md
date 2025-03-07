@@ -29,5 +29,6 @@
 
 - 实现多版本并发控制（MVCC）层 ✅
 - ![alt text](images/image_part4A.png)
-- 实现 KvGet、KvPrewrite 和 KvCommit 请求的处理程序
+- 实现 KvGet、KvPrewrite 和 KvCommit 请求的处理程序 ✅
+- ![alt text](images/image_part4B.png)
 - 实现 KvScan、KvCheckTxnStatus、KvBatchRollback 和 KvResolveLock 请求的处理程序
