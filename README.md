@@ -25,7 +25,7 @@
 - 实现一个基础的调度器 ✅
 - ![alt text](images/image_part3C.png)
 
-## PartD (Transaction)
+## PartD (Transaction) ✅
 
 - 实现多版本并发控制（MVCC）层 ✅
 - ![alt text](images/image_part4A.png)
