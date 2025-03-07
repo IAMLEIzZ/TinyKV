@@ -131,4 +131,6 @@ project4b:
 	$(GOTEST) ./kv/transaction/... -run 4B
 
 project4c:
+	$(TEST_CLEAN)
 	$(GOTEST) ./kv/transaction/... -run 4C
+	$(TEST_CLEAN)
