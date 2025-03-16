@@ -256,7 +256,7 @@ func (r *Raft) tick() {
 			// 设置随机选举时间为 [et, 2 * et - 1]
 			r.electionElapsed = 0
 			r.electionTimeout = r.et + rand.Intn(r.et)
-			if r.leadTransferee != 0{
+			if r.leadTransferee != 0 {
 				r.leadTransferee = 0
 				r.becomeLeader()
 			} else {
@@ -284,7 +284,7 @@ func (r *Raft) tick() {
 			r.heartbeatResp = make(map[uint64]bool)
 			r.heartbeatResp[r.id] = true
 			// 心跳回应数不超过一半，重新开始选举
-			if hbrNum * 2 <= total {
+			if hbrNum*2 <= total {
 				r.startElection()
 			}
 		}
@@ -298,7 +298,7 @@ func (r *Raft) tick() {
 			r.heartbeatElapsed = 0
 			for k := range r.Prs {
 				_, ok := r.Prs[k]
-				if k != r.id && ok{
+				if k != r.id && ok {
 					r.sendHeartbeat(k)
 				}
 			}
@@ -314,7 +314,7 @@ func (r *Raft) canbeLeader() bool {
 			vote_num++
 		}
 	}
-	return vote_num > len(r.votes) / 2
+	return vote_num > len(r.votes)/2
 }
 
 // becomeFollower transform this peer's state to Follower
@@ -358,7 +358,7 @@ func (r *Raft) becomeLeader() {
 	// 清空投票
 	for k := range r.votes {
 		_, ok := r.votes[k]
-		if k != r.id && ok{
+		if k != r.id && ok {
 			r.votes[k] = false
 		}
 	}
@@ -469,7 +469,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 		// 提醒自己发心跳
 		for k := range r.Prs {
 			_, ok := r.Prs[k]
-			if k != r.id && ok{
+			if k != r.id && ok {
 				r.sendHeartbeat(k)
 			}
 		}
@@ -508,7 +508,7 @@ func (r *Raft) stepLeader(m pb.Message) {
 func (r *Raft) handleTransferLeader(m pb.Message) {
 	_, exists := r.Prs[m.From]
 	if !exists {
-		return 
+		return
 	}
 	// 转移目标
 	target := m.From
@@ -565,7 +565,7 @@ func (r *Raft) sendAppend(to uint64) {
 	_, ok := r.Prs[to]
 	if !ok {
 		log.Infof("节点 %d 不存在", to)
-		return 
+		return
 	}
 	// Your Code Here (2A).
 	// 要根据每一个成员的进度获取
@@ -579,7 +579,7 @@ func (r *Raft) sendAppend(to uint64) {
 	// r.Prs[to].Next-r.RaftLog.entries[0].Index 假设期待收到 4 号日志，4 号日志对应的下标为 3，entires[0].Index = 1,
 	firstIndex := r.RaftLog.FirstIndex()
 	// 这里如果 firstIndex - 1 > prev_idx 的情况，则代表要发送 snapshot (if firstIndex - 1 > prev_idx && prev_idx != 0)
-	if firstIndex - 1 > prev_idx || err != nil{
+	if firstIndex-1 > prev_idx || err != nil {
 		// println("send snapShot to", to)
 		r.sendSnapshot(to)
 		return
@@ -649,7 +649,7 @@ func (r *Raft) appendEntry(m pb.Message) {
 func (r *Raft) sendAppendMessage() {
 	for id := range r.Prs {
 		_, ok := r.Prs[id]
-		if id != r.id && ok{
+		if id != r.id && ok {
 			r.sendAppend(id)
 		}
 	}
@@ -668,7 +668,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	}
 	if _, exist := r.Prs[m.From]; !exist {
 		log.Infof("节点 %d 已经不存在", m.From)
-		return 
+		return
 	}
 	// log.Infof("成功接收到来自 %d 的 Append 回应", m.From)
 	// if m.Index > r.Prs[m.From].Match && m.GetReject() {
@@ -679,7 +679,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	// 如果拒绝，则会缩小对应的 prs
 	from := m.GetFrom()
 	if m.GetReject() {
-		r.Prs[m.From].Next = min(m.Index + 1, r.Prs[m.From].Next-1)
+		r.Prs[m.From].Next = min(m.Index+1, r.Prs[m.From].Next-1)
 		r.sendAppend(m.From)
 		return
 	}
@@ -741,6 +741,7 @@ func (r *Raft) sendVote(m pb.Message) {
 		msg.Reject = true
 	}
 
+	// follower 会拒绝掉日志没有自己新的 candidate
 	if r.State == StateFollower {
 		// 发送者的最后任期等于 MessageType_MsgRequestVote 的任期但发送者的最后提交索引大于或等于 follower 的时，follower 才会投票给发送者。
 		rli := r.RaftLog.LastIndex()
@@ -774,7 +775,7 @@ func (r *Raft) startElection() {
 	// 如果此时节点不在集群中，则状态保持不变
 	_, exist := r.Prs[r.id]
 	if !exist {
-		return 
+		return
 	}
 	// 给自己投票
 	r.becomeCandidate()
@@ -822,18 +823,18 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		r.electionElapsed = 0
 		r.becomeFollower(m.Term, m.From)
 	}
-	
+
 	msg_prev_index, msg_prev_term := m.Index, m.LogTerm
 	// 当前 msg 的前序日志与 raft 节点的日志有 gap
 	if msg_prev_index > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.From, r.RaftLog.LastIndex() + 1, true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex()+1, true)
 		return
 	}
 
 	term, err := r.RaftLog.Term(msg_prev_index)
 	if term != msg_prev_term && err == nil {
 		// 虽然日志的 index 匹配一致了，但是与term 匹配不一致，则拒绝添加日志
-		r.sendAppendResponse(m.From, r.RaftLog.LastIndex() + 1, true)
+		r.sendAppendResponse(m.From, r.RaftLog.LastIndex()+1, true)
 		return
 	}
 	// prev_index 和 prev_term 都对上了，允许添加日志
@@ -847,7 +848,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		if en_idx-r.RaftLog.FirstIndex() > uint64(len(r.RaftLog.entries)) || en_idx > r.RaftLog.LastIndex() {
 			// 追加
 			r.RaftLog.entries = append(r.RaftLog.entries, *en)
-		} else if old_term != en.Term || err != nil{
+		} else if old_term != en.Term || err != nil {
 			// 不是同一条日志，需要覆盖
 			if en_idx < r.RaftLog.FirstIndex() {
 				r.RaftLog.entries = make([]pb.Entry, 0)
@@ -904,7 +905,6 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if r.Term > m.Term {
 		return
 	}
-	
 
 	metaData := m.Snapshot.Metadata
 	shotIndex := metaData.Index
@@ -917,7 +917,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	}
 
 	if r.Lead != m.From {
-		r.Lead = m .From
+		r.Lead = m.From
 	}
 
 	// 丢弃之前的所有 entry
@@ -932,7 +932,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.RaftLog.committed = shotIndex
 	r.RaftLog.applied = shotIndex
 	r.RaftLog.stabled = shotIndex
-	
+
 	// 集群节点变更
 	if shotConf != nil {
 		// fmt.Printf("处理 snapshot, 节点数从 %d --> %d\n", len(r.Prs), len(shotConf.Nodes))
@@ -966,10 +966,10 @@ func (r *Raft) addNode(id uint64) {
 	if exist {
 		// 节点已经存在
 		// println("节点已经存在")
-		return 
+		return
 	}
 	// if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
-	// 	return 
+	// 	return
 	// }
 	r.Prs[id] = &Progress{}
 	r.votes[id] = false
@@ -987,10 +987,10 @@ func (r *Raft) removeNode(id uint64) {
 	_, exist := r.Prs[id]
 	if !exist {
 		// 节点不存在
-		return 
+		return
 	}
 	// if r.PendingConfIndex != 0 && r.RaftLog.applied < r.PendingConfIndex {
-	// 	return 
+	// 	return
 	// }
 	delete(r.Prs, id)
 	delete(r.votes, id)
@@ -1008,13 +1008,13 @@ func (r *Raft) removeNode(id uint64) {
 }
 
 func (r *Raft) updateCommit() {
-    // 获取所有节点的 matchIndex 并排序（从大到小）
+	// 获取所有节点的 matchIndex 并排序（从大到小）
 	var match_idx_slice []uint64
 	for _, rp := range r.Prs {
 		match_idx_slice = append(match_idx_slice, rp.Match)
 	}
 	//  降序排序
-	sort.Slice(match_idx_slice, func (x, y int) bool {
+	sort.Slice(match_idx_slice, func(x, y int) bool {
 		return match_idx_slice[x] > match_idx_slice[y]
 	})
 	//  多数派满足数量
