@@ -11,6 +11,7 @@
 <img src="images/raft1.png" alt="Raft Election 1" />
 <img src="images/raft2.png" alt="Raft Election 2" />
 </center>
+
 ### 2.1 Raft 选举流程
 首先 Raft 的角色被分为 Leader，Follower，Candidate
 #### Follower
