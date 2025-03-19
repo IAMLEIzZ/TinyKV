@@ -96,6 +96,12 @@ ConfVersion 是控制 Raft 节点变更的关键，如果一个 Raft 请求的�
 
 ### 3.3 Lab3-B Split
 Ontick()会定期检查每个 Region 的大小，来判断当前的 Region 是不要进行分裂，判断依据主要是 Region 当前的大小
+#### Split
+    1. 上层的 Ontick 会定期的推进检查 splitCheck()
+    2. 这个任务会检查对应的 Region 的整体大小是不是在规定范围之内
+    3. 如果在范围内，则结束，如果不在范围内，则需要 Split，他会返回中的 key 作为分界线
+    4. 接着，会发送一个 Split 提议给 Node，提议里包含了分裂的 KeyId、新创建的 PeerId 和 RegionId （这些都是框架检查完后帮我们自动分配好的）
+    5. 最后，我们只要自己把注册一下这些 Peer 信息和 Region 信息就行
 ## 4. Lab-4
 这里难度也不大，和 Lab-1 持平，主要是理解读写加锁流程，这里贴上我画的示意图
 ### 2PC——1——PreWirte

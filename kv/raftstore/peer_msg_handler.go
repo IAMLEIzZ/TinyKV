@@ -577,12 +577,12 @@ func (d *peerMsgHandler) proposeNormalCommand(msg *raft_cmdpb.RaftCmdRequest, cb
 }
 
 func (d *peerMsgHandler) checkRemoveNode(id uint64) bool {
-	// if d.LeaderId() == id && len(d.peer.RaftGroup.Raft.Prs) == 2 {
-	// 	return false
-	// }
-	if d.LeaderId() == id {
+	if d.LeaderId() == id && len(d.peer.RaftGroup.Raft.Prs) == 2 {
 		return false
 	}
+	// if d.LeaderId() == id {
+	// 	return false
+	// }
 	return true
 }
 
