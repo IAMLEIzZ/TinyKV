@@ -732,7 +732,7 @@ func (r *Raft) sendVote(m pb.Message) {
 	if r.Term < m.Term {
 		r.becomeFollower(m_term, None)
 	}
-
+	// 如果 From 正好是要转移的对象，要继续投票
 	if r.Term < m.Term && r.leadTransferee == m.From {
 		r.becomeFollower(m.Term, None)
 	}
